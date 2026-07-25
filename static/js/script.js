@@ -16,7 +16,7 @@
 (() => {
   "use strict";
 
-  const MAX_VIDEOS = 5;
+  const MAX_VIDEOS = 20;
 
   /* ------------------------------------------------------------------ *
    * Element references
@@ -90,6 +90,13 @@
   const coachForm = document.getElementById("coach-form");
   const coachInput = document.getElementById("coach-input");
   const coachSend = document.getElementById("coach-send");
+
+  const apiKeyChangeBtn = document.getElementById("api-key-change-btn");
+  const apiKeyModal = document.getElementById("api-key-modal");
+  const apiKeyInput = document.getElementById("api-key-input");
+  const apiKeyCancelBtn = document.getElementById("api-key-cancel");
+  const apiKeySaveBtn = document.getElementById("api-key-save");
+  const apiKeyClearBtn = document.getElementById("api-key-clear");
 
   const infoFilename = document.getElementById("info-filename");
   const infoResolution = document.getElementById("info-resolution");
@@ -731,16 +738,86 @@
     coachLog.scrollTop = coachLog.scrollHeight;
   }
 
-  coachModeGroup.addEventListener("click", (e) => {
-    const btn = e.target.closest(".coach-mode__btn");
-    if (!btn) return;
-    coachMode = btn.dataset.mode;
+  /* ---- Anthropic API key (AI Chat mode — bring your own key) ----
+   * This app is used by other people, not just its developer, so AI Chat
+   * calls Claude with a key each visitor supplies themselves rather than
+   * one shared server-side key. The key lives only in this browser's
+   * localStorage and rides along with each /api/coach request; the server
+   * never stores it (see ai_coach.py — it's used for one API call and
+   * discarded). */
+
+  const API_KEY_STORAGE_KEY = "darts_anthropic_api_key";
+
+  function getStoredApiKey() {
+    try { return localStorage.getItem(API_KEY_STORAGE_KEY) || ""; } catch (err) { return ""; }
+  }
+
+  function setStoredApiKey(key) {
+    try {
+      if (key) localStorage.setItem(API_KEY_STORAGE_KEY, key);
+      else localStorage.removeItem(API_KEY_STORAGE_KEY);
+    } catch (err) {
+      // Storage unavailable (private browsing, etc.) — key just won't persist across reloads.
+    }
+  }
+
+  function updateApiKeyLink() {
+    if (coachMode !== "llm") { apiKeyChangeBtn.hidden = true; return; }
+    apiKeyChangeBtn.hidden = false;
+    apiKeyChangeBtn.textContent = getStoredApiKey() ? "Using your saved API key · Change" : "Set your API key";
+  }
+
+  function setCoachModeUI(mode) {
+    coachMode = mode;
     coachModeGroup.querySelectorAll(".coach-mode__btn").forEach((b) => {
-      const active = b === btn;
+      const active = b.dataset.mode === mode;
       b.classList.toggle("is-active", active);
       b.setAttribute("aria-checked", active ? "true" : "false");
     });
+    updateApiKeyLink();
+  }
+
+  function openApiKeyModal() {
+    apiKeyInput.value = getStoredApiKey();
+    apiKeyModal.hidden = false;
+    apiKeyInput.focus();
+  }
+
+  function closeApiKeyModal() {
+    apiKeyModal.hidden = true;
+  }
+
+  coachModeGroup.addEventListener("click", (e) => {
+    const btn = e.target.closest(".coach-mode__btn");
+    if (!btn) return;
+    setCoachModeUI(btn.dataset.mode);
+    if (btn.dataset.mode === "llm" && !getStoredApiKey()) openApiKeyModal();
   });
+
+  apiKeyChangeBtn.addEventListener("click", openApiKeyModal);
+
+  apiKeySaveBtn.addEventListener("click", () => {
+    const key = apiKeyInput.value.trim();
+    if (!key) { showToast("Enter a valid API key."); return; }
+    setStoredApiKey(key);
+    closeApiKeyModal();
+    updateApiKeyLink();
+    showToast("API key saved in this browser.");
+  });
+
+  apiKeyClearBtn.addEventListener("click", () => {
+    setStoredApiKey("");
+    apiKeyInput.value = "";
+    updateApiKeyLink();
+    showToast("Saved API key cleared.");
+  });
+
+  apiKeyCancelBtn.addEventListener("click", () => {
+    closeApiKeyModal();
+    if (!getStoredApiKey()) setCoachModeUI("rule");
+  });
+
+  apiKeyModal.addEventListener("click", (e) => { if (e.target === apiKeyModal) apiKeyCancelBtn.click(); });
 
   coachForm.addEventListener("submit", async (e) => {
     e.preventDefault();
@@ -759,14 +836,18 @@
     coachSend.disabled = true;
 
     try {
+      const payload = { question, mode: coachMode };
+      if (coachMode === "llm") payload.api_key = getStoredApiKey();
+
       const res = await fetch(`/api/coach/${video.id}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ question, mode: coachMode }),
+        body: JSON.stringify(payload),
       });
       const data = await res.json();
       if (!res.ok) {
         appendCoachMessage("error", data.error || "Couldn't get an answer.");
+        if (coachMode === "llm" && /api key/i.test(data.error || "")) openApiKeyModal();
       } else {
         appendCoachMessage("assistant", data.answer);
       }

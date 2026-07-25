@@ -29,7 +29,7 @@
       <span class="brand__text">Darts Throw Analysis <span class="brand__ai">AI</span></span>
     </div>
     <nav class="topbar__status">
-      <span class="pill" id="video-count-pill">0 / 5 throws loaded</span>
+      <span class="pill" id="video-count-pill">0 / 20 throws loaded</span>
     </nav>
   </div>
 </header>
@@ -60,7 +60,7 @@
         </svg>
       </div>
       <p class="dropzone__title">Drop throw videos here</p>
-      <p class="dropzone__hint">or click to browse &mdash; MP4, MOV, AVI, WEBM &middot; up to 5 videos</p>
+      <p class="dropzone__hint">or click to browse &mdash; MP4, MOV, AVI, WEBM &middot; up to 20 videos</p>
       <div class="dropzone__actions">
         <button class="btn btn--primary" id="upload-btn" type="button">Upload Videos</button>
         <button class="btn btn--outline" id="record-btn" type="button">Record a Throw</button>
@@ -77,7 +77,7 @@
   <section class="library" aria-label="Video library">
     <div class="library__header">
       <h2>Throw Library</h2>
-      <span class="pill pill--ghost" id="library-count">0 / 5</span>
+      <span class="pill pill--ghost" id="library-count">0 / 20</span>
     </div>
     <div class="library__grid" id="library-grid"><!-- video cards injected here --></div>
     <div class="library__add-actions">
@@ -223,6 +223,7 @@
         <button type="button" class="coach-mode__btn is-active" data-mode="rule" role="radio" aria-checked="true">Quick Answers</button>
         <button type="button" class="coach-mode__btn" data-mode="llm" role="radio" aria-checked="false">AI Chat</button>
       </div>
+      <button type="button" class="api-key-link" id="api-key-change-btn" hidden></button>
       <div class="coach-log" id="coach-log">
         <p class="coach-log__empty" id="coach-log-empty">Analyze a throw, then ask about your elbow, wrist, direction, or how your throws compare.</p>
       </div>
@@ -242,6 +243,25 @@
     <div class="modal__actions">
       <button class="btn btn--outline" id="rename-cancel">Cancel</button>
       <button class="btn btn--primary" id="rename-confirm">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- Anthropic API key modal (AI Chat mode — bring your own key) -->
+<div class="modal" id="api-key-modal" hidden>
+  <div class="modal__card">
+    <h3>Your Anthropic API Key</h3>
+    <p class="api-key-hint">
+      AI Chat calls the Claude API directly using your own key. It's stored only in
+      this browser (never sent anywhere but this server, never saved server-side) and
+      you're billed directly by Anthropic for what you use. Get a key at
+      <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener noreferrer">console.anthropic.com</a>.
+    </p>
+    <input type="password" id="api-key-input" class="text-input" placeholder="sk-ant-..." autocomplete="off" spellcheck="false">
+    <div class="modal__actions">
+      <button class="btn btn--outline" id="api-key-clear">Clear Saved Key</button>
+      <button class="btn btn--outline" id="api-key-cancel">Cancel</button>
+      <button class="btn btn--primary" id="api-key-save">Save Key</button>
     </div>
   </div>
 </div>

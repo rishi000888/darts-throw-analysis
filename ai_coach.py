@@ -7,8 +7,11 @@ Two ways to answer a question about a throw's analysis:
   already-computed numbers in plain language. Free, instant, no API key,
   but can't answer anything outside its keyword list.
 - LLM ("AI chat"): a real call to the Claude API, given the computed
-  analysis as context. Free-form, but needs ANTHROPIC_API_KEY set and
-  costs a small amount per question.
+  analysis as context. Free-form, but needs an Anthropic API key and costs
+  a small amount per question. Each caller brings their own key (typed
+  into the frontend, passed as `api_key`) rather than sharing the server's
+  — `ANTHROPIC_API_KEY` in the environment is only a fallback for local
+  dev, not something a multi-user deployment should rely on.
 
 Which mode is used is a per-request choice made by the caller (the
 frontend toggle) — this module doesn't decide that itself.
@@ -145,16 +148,23 @@ SYSTEM_PROMPT = (
 )
 
 
-def llm_answer(question, analysis):
+def llm_answer(question, analysis, api_key=None):
     if not ANTHROPIC_SDK_AVAILABLE:
         raise CoachError("The anthropic package isn't installed on the server.")
-    if not (os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")):
+
+    # Bring-your-own-key: a key supplied by the caller (typed into the
+    # frontend, stored in that browser's localStorage) always wins over
+    # anything set on the server — this app is meant to be used by other
+    # people, each paying for their own Claude usage, not sharing the
+    # developer's key. ANTHROPIC_API_KEY is only a fallback for local dev.
+    key = api_key or os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")
+    if not key:
         raise CoachError(
-            "AI Chat needs an Anthropic API key on the server — set the ANTHROPIC_API_KEY "
-            "environment variable and restart the app. Use Quick Answers mode until then."
+            "AI Chat needs an Anthropic API key — click \"AI Chat\" and enter your own key. "
+            "Quick Answers mode works without one."
         )
 
-    client = anthropic.Anthropic()
+    client = anthropic.Anthropic(api_key=key)
     context = _analysis_context_text(analysis)
 
     try:
@@ -167,10 +177,12 @@ def llm_answer(question, analysis):
                 "content": f"Throw analysis:\n{context}\n\nQuestion: {question}",
             }],
         )
+    except anthropic.AuthenticationError as err:
+        raise CoachError("That API key was rejected by Anthropic — double-check it and try again.") from err
     except anthropic.APIStatusError as err:
         raise CoachError(f"AI Chat request failed: {err.message}") from err
     except anthropic.APIConnectionError as err:
-        raise CoachError("Couldn't reach the Claude API — check the server's network connection.") from err
+        raise CoachError("Couldn't reach the Claude API — check your network connection.") from err
 
     if response.stop_reason == "refusal":
         raise CoachError("The AI declined to answer that question.")
@@ -179,10 +191,10 @@ def llm_answer(question, analysis):
     return text or "(no response text)"
 
 
-def answer_question(question, analysis, mode):
+def answer_question(question, analysis, mode, api_key=None):
     question = (question or "").strip()
     if not question:
         raise CoachError("Ask a question first.")
     if mode == "llm":
-        return llm_answer(question, analysis)
+        return llm_answer(question, analysis, api_key=api_key)
     return rule_based_answer(question, analysis)

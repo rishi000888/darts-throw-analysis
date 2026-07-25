@@ -3,7 +3,7 @@ Darts Throw Analysis AI — Phase 1 backend.
 
 This Flask app handles:
     - Serving the single-page app (templates/index.html)
-    - Uploading throw videos (1-5 videos, mp4/mov/avi)
+    - Uploading throw videos (1-20 videos, mp4/mov/avi/webm)
     - Extracting basic, non-AI metadata (resolution, fps, duration, size)
       with OpenCV so the Video Information Panel can show real numbers
     - Generating a first-frame thumbnail for each video
@@ -38,8 +38,8 @@ LIBRARY_FILE = os.path.join(BASE_DIR, "static", "uploads", "library.json")
 
 ALLOWED_EXTENSIONS = {"mp4", "mov", "avi", "webm"}
 VALID_ARMS = {"left", "right"}
-MAX_VIDEOS = 5
-MAX_CONTENT_LENGTH = 500 * 1024 * 1024  # 500 MB total request cap
+MAX_VIDEOS = 20
+MAX_CONTENT_LENGTH = 2000 * 1024 * 1024  # 2 GB total request cap (scaled with MAX_VIDEOS)
 
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(THUMB_DIR, exist_ok=True)
@@ -303,11 +303,12 @@ def coach(video_id):
     data = request.get_json(silent=True) or {}
     question = data.get("question", "")
     mode = data.get("mode", "rule")
+    api_key = (data.get("api_key") or "").strip() or None
     if mode not in ("rule", "llm"):
         return jsonify({"error": "mode must be 'rule' or 'llm'."}), 400
 
     try:
-        answer = ai_coach.answer_question(question, analysis, mode)
+        answer = ai_coach.answer_question(question, analysis, mode, api_key=api_key)
     except ai_coach.CoachError as err:
         return jsonify({"error": str(err)}), 400
 

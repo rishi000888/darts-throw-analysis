@@ -5,7 +5,7 @@ frame-accurate, slow-motion video player, plus AI pose-detection scoring.
 
 ## What's included
 
-- Landing page with drag-and-drop upload (1–5 videos, MP4/MOV/AVI/WEBM)
+- Landing page with drag-and-drop upload (1–20 videos, MP4/MOV/AVI/WEBM)
 - **Record a throw directly from your camera** — no separate camera app
   needed. Opens a live preview via `getUserMedia`, records with
   `MediaRecorder`, and feeds the clip into the same upload pipeline as a
@@ -127,5 +127,5 @@ next time either is started. Nothing to keep in sync manually.
   `localhost`, an HTTPS origin — `getUserMedia` is blocked on plain HTTP for
   any other host.
 - Possible next steps: PDF report export and multi-video side-by-side
-  comparison — the video library already supports up to 5 videos, which was
+  comparison — the video library already supports up to 20 videos, which was
   built with that in mind.

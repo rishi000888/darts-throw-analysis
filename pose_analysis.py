@@ -52,11 +52,13 @@ except ImportError:
 MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                            "models", "pose_landmarker_lite.task")
 
-# MediaPipe Pose landmark indices we care about (right arm only — a
-# right-handed throw is assumed for Version 2).
-RIGHT_SHOULDER = 12
-RIGHT_ELBOW = 14
-RIGHT_WRIST = 16
+# MediaPipe Pose landmark indices for each arm — caller picks which one to
+# track (see `arm` param on `analyze_throw`), since a throw could be
+# right- or left-handed.
+ARM_LANDMARKS = {
+    "right": {"shoulder": 12, "elbow": 14, "wrist": 16},
+    "left": {"shoulder": 11, "elbow": 13, "wrist": 15},
+}
 
 VISIBILITY_THRESHOLD = 0.5
 ELBOW_STABILITY_SCALE = 3.0     # degrees of stdev -> percentage points lost
@@ -100,10 +102,11 @@ def _clamp(value, low=0.0, high=100.0):
     return max(low, min(high, value))
 
 
-def _extract_landmark_stream(video_path):
+def _extract_landmark_stream(video_path, arm):
     """Single pass over the video: returns (fps, width, height,
     elbow_angles, wrist_positions, shoulder_positions, elbow_positions,
     total_frames)."""
+    landmarks = ARM_LANDMARKS[arm]
     if not MEDIAPIPE_AVAILABLE:
         raise AnalysisError(
             "Pose detection isn't available on the server (mediapipe not installed)."
@@ -145,7 +148,7 @@ def _extract_landmark_stream(video_path):
 
             if result.pose_landmarks:
                 lm = result.pose_landmarks[0]
-                shoulder, elbow, wrist = lm[RIGHT_SHOULDER], lm[RIGHT_ELBOW], lm[RIGHT_WRIST]
+                shoulder, elbow, wrist = lm[landmarks["shoulder"]], lm[landmarks["elbow"]], lm[landmarks["wrist"]]
 
                 if (shoulder.visibility >= VISIBILITY_THRESHOLD and
                         elbow.visibility >= VISIBILITY_THRESHOLD and
@@ -289,7 +292,7 @@ def _score_throw(window_start, window_end, release_frame, fps, diagonal,
         "window_end_frame": window_end,
         "release_frame": release_frame,
         "release_time": round(release_frame / fps, 3),
-        "right_elbow": {
+        "elbow": {
             "angle_avg": round(statistics.mean(window_angles), 1),
             "angle_min": round(min(window_angles), 1),
             "angle_max": round(max(window_angles), 1),
@@ -297,7 +300,7 @@ def _score_throw(window_start, window_end, release_frame, fps, diagonal,
             "label": _score_band(elbow_stability_score),
             "direction": direction,
         },
-        "right_wrist": {
+        "wrist": {
             "peak_speed_pct_per_sec": round(peak_speed, 1),
             "score": wrist_snap_score,
             "label": _score_band(wrist_snap_score),
@@ -309,19 +312,27 @@ def _score_throw(window_start, window_end, release_frame, fps, diagonal,
     }
 
 
-def analyze_throw(video_path):
+def analyze_throw(video_path, arm="right"):
     """Run pose detection over the video and return a multi-throw analysis.
 
-    Raises AnalysisError if MediaPipe isn't installed or too few frames
-    had a confidently-detected right arm to compute anything meaningful.
+    `arm` is "right" or "left" — which arm to track (Version 2 only tracks
+    one arm per analysis, picked by the caller since a throw could be
+    either-handed).
+
+    Raises AnalysisError if MediaPipe isn't installed, `arm` is invalid, or
+    too few frames had a confidently-detected arm to compute anything
+    meaningful.
     """
+    if arm not in ARM_LANDMARKS:
+        raise AnalysisError(f"Invalid arm '{arm}' — must be 'left' or 'right'.")
+
     fps, width, height, elbow_angles, wrist_pos, elbow_pos, total_frames = \
-        _extract_landmark_stream(video_path)
+        _extract_landmark_stream(video_path, arm)
     diagonal = math.hypot(width, height)
 
     if len(elbow_angles) < MIN_VALID_FRAMES or len(wrist_pos) < MIN_VALID_FRAMES:
         raise AnalysisError(
-            "Couldn't reliably detect a right arm in this video — try a clearer, "
+            f"Couldn't reliably detect a {arm} arm in this video — try a clearer, "
             "well-lit clip with the whole arm in frame."
         )
 
@@ -366,6 +377,7 @@ def analyze_throw(video_path):
     consistency_score = round(_clamp(100 - consistency_stdev * 2))
 
     return {
+        "arm": arm,
         "throw_count": len(throws),
         "throws": throws,
         "comparison": {

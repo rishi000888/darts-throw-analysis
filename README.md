@@ -5,7 +5,11 @@ frame-accurate, slow-motion video player, plus AI pose-detection scoring.
 
 ## What's included
 
-- Landing page with drag-and-drop upload (1–5 videos, MP4/MOV/AVI)
+- Landing page with drag-and-drop upload (1–5 videos, MP4/MOV/AVI/WEBM)
+- **Record a throw directly from your camera** — no separate camera app
+  needed. Opens a live preview via `getUserMedia`, records with
+  `MediaRecorder`, and feeds the clip into the same upload pipeline as a
+  picked file once you hit "Use This Recording".
 - Video library with thumbnail, duration, file size, rename, and delete
 - Custom video player: play / pause / stop, frame-by-frame stepping,
   fullscreen, mute, volume
@@ -15,19 +19,21 @@ frame-accurate, slow-motion video player, plus AI pose-detection scoring.
 - Video information panel (filename, resolution, FPS, duration, file size) —
   read with OpenCV at upload time
 - **AI Throw Analysis** (`pose_analysis.py`): MediaPipe Pose (Tasks API)
-  tracks the right shoulder/elbow/wrist across every frame, **auto-detects
-  each individual throw** in the clip (peaks in wrist speed), and scores
-  each one separately: elbow stability, elbow drift direction (up/down,
-  left/right), wrist snap, release frame, and an overall score — each
-  shown with a color-coded band (Excellent / Very Good / Good / Needs Work).
-  A pictograph lets you click between detected throws; a comparison line
-  shows average/best/worst/consistency across all of them. Results are
-  cached per video in `library.json` so re-selecting an already-analyzed
-  throw is instant. The scoring and throw-detection formulas are a
-  documented heuristic (see the docstring in `pose_analysis.py`), not a
-  trained biomechanical model — there's no labeled dart-throw dataset to
-  calibrate against yet, and fast repeated arm motion can be over-counted
-  as extra throws.
+  tracks the shoulder/elbow/wrist of **either arm — a Right/Left toggle sits
+  above "Start Analysis"** (right-handed by default) — across every frame,
+  **auto-detects each individual throw** in the clip (peaks in wrist speed),
+  and scores each one separately: elbow stability, elbow drift direction
+  (up/down, left/right), wrist snap, release frame, and an overall score —
+  each shown with a color-coded band (Excellent / Very Good / Good / Needs
+  Work). A pictograph lets you click between detected throws; a comparison
+  line shows average/best/worst/consistency across all of them. Results are
+  cached per video *and per arm* in `library.json`, so re-selecting an
+  already-analyzed throw is instant, but switching the arm toggle and
+  re-running always does a fresh pass. The scoring and throw-detection
+  formulas are a documented heuristic (see the docstring in
+  `pose_analysis.py`), not a trained biomechanical model — there's no
+  labeled dart-throw dataset to calibrate against yet, and fast repeated arm
+  motion can be over-counted as extra throws.
 - **Ask AI** (`ai_coach.py`): a coaching Q&A box with two modes — **Quick
   Answers** (free, instant, keyword-matched explanations of the computed
   numbers) and **AI Chat** (a real Claude API call with the analysis as
@@ -115,8 +121,11 @@ next time either is started. Nothing to keep in sync manually.
   for a ~45s clip at 30fps this takes roughly a minute on CPU. There's no
   progress bar beyond the "Analyzing…" status text; a longer clip just takes
   longer.
-- Only the right arm is tracked (shoulder/elbow/wrist), assuming a
-  right-handed throw.
-- Possible next steps: left-handed toggle, PDF report export, and
-  multi-video side-by-side comparison — the video library already supports
-  up to 5 videos, which was built with that in mind.
+- Only one arm is tracked per analysis (shoulder/elbow/wrist), picked via
+  the Right/Left toggle — there's no whole-body or two-arm scoring.
+- Camera recording needs browser permission for the camera and, outside of
+  `localhost`, an HTTPS origin — `getUserMedia` is blocked on plain HTTP for
+  any other host.
+- Possible next steps: PDF report export and multi-video side-by-side
+  comparison — the video library already supports up to 5 videos, which was
+  built with that in mind.

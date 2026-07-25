@@ -36,7 +36,8 @@ UPLOAD_DIR = os.path.join(BASE_DIR, "static", "uploads", "videos")
 THUMB_DIR = os.path.join(BASE_DIR, "static", "uploads", "thumbnails")
 LIBRARY_FILE = os.path.join(BASE_DIR, "static", "uploads", "library.json")
 
-ALLOWED_EXTENSIONS = {"mp4", "mov", "avi"}
+ALLOWED_EXTENSIONS = {"mp4", "mov", "avi", "webm"}
+VALID_ARMS = {"left", "right"}
 MAX_VIDEOS = 5
 MAX_CONTENT_LENGTH = 500 * 1024 * 1024  # 500 MB total request cap
 
@@ -159,7 +160,7 @@ def upload_videos():
         if file.filename == "":
             continue
         if not _allowed_file(file.filename):
-            errors.append(f"{file.filename}: unsupported format (use MP4, MOV, or AVI).")
+            errors.append(f"{file.filename}: unsupported format (use MP4, MOV, AVI, or WEBM).")
             continue
 
         original_name = secure_filename(file.filename)
@@ -263,14 +264,18 @@ def analyze_video(video_id):
     if entry is None:
         return jsonify({"error": "Video not found."}), 404
 
+    arm = request.args.get("arm", "right")
+    if arm not in VALID_ARMS:
+        return jsonify({"error": "arm must be 'left' or 'right'."}), 400
+
     force = request.args.get("force") == "1"
     cached = entry.get("analysis")
-    if cached and cached.get("throws") and not force:
+    if cached and cached.get("throws") and cached.get("arm") == arm and not force:
         return jsonify({"status": "ok", "cached": True, "analysis": cached})
 
     video_path = os.path.join(UPLOAD_DIR, entry["stored_name"])
     try:
-        analysis = pose_analysis.analyze_throw(video_path)
+        analysis = pose_analysis.analyze_throw(video_path, arm=arm)
     except pose_analysis.AnalysisError as err:
         return jsonify({"status": "error", "message": str(err)}), 422
 

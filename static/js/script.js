@@ -28,6 +28,19 @@
   const addMoreBtn = document.getElementById("add-more-btn");
   const uploadFeedback = document.getElementById("upload-feedback");
 
+  const recordBtn = document.getElementById("record-btn");
+  const recordMoreBtn = document.getElementById("record-more-btn");
+  const recordModal = document.getElementById("record-modal");
+  const recordPreview = document.getElementById("record-preview");
+  const recordIndicator = document.getElementById("record-indicator");
+  const recordTimerEl = document.getElementById("record-timer");
+  const recordHint = document.getElementById("record-hint");
+  const recordCancelBtn = document.getElementById("record-cancel");
+  const recordStartBtn = document.getElementById("record-start");
+  const recordStopBtn = document.getElementById("record-stop");
+  const recordRetakeBtn = document.getElementById("record-retake");
+  const recordUseBtn = document.getElementById("record-use");
+
   const hero = document.getElementById("hero");
   const workspace = document.getElementById("workspace");
 
@@ -59,6 +72,7 @@
   const speedValue = document.getElementById("speed-value");
   const speedPresets = document.getElementById("speed-presets");
 
+  const armSelect = document.getElementById("arm-select");
   const analyzeBtn = document.getElementById("analyze-btn");
   const analysisStatusPill = document.getElementById("analysis-status-pill");
   const analysisElbow = document.getElementById("analysis-elbow");
@@ -102,6 +116,14 @@
   let selectedThrowIndex = 0;  // which throw's detail is shown, within the active video's analysis.throws
   let coachMode = "rule";      // "rule" | "llm"
   let coachBusy = false;
+  let selectedArm = "right";   // "right" | "left" — which arm to analyze
+
+  let mediaStream = null;      // active getUserMedia stream, while the record modal is open
+  let mediaRecorder = null;
+  let recordedChunks = [];
+  let recordedBlob = null;
+  let recordTimerInterval = null;
+  let recordStartedAt = 0;
 
   /* ------------------------------------------------------------------ *
    * Helpers
@@ -363,8 +385,8 @@
   }
 
   function renderThrowDetail(throw_) {
-    const elbow = throw_.right_elbow;
-    const wrist = throw_.right_wrist;
+    const elbow = throw_.elbow;
+    const wrist = throw_.wrist;
     const overall = throw_.overall;
 
     analysisElbow.textContent = `${elbow.score}% — ${elbow.label}`;
@@ -429,11 +451,12 @@
 
   function renderAnalysis(analysis) {
     const c = analysis.comparison;
+    const armLabel = analysis.arm === "left" ? "left arm" : "right arm";
     comparisonSummary.hidden = false;
     comparisonSummary.textContent = analysis.throw_count > 1
-      ? `${analysis.throw_count} throws detected — average ${c.average_score}% (${c.average_label}), ` +
+      ? `${analysis.throw_count} throws detected (${armLabel}) — average ${c.average_score}% (${c.average_label}), ` +
         `best #${c.best_throw_number}, consistency ${c.consistency_score}% (${c.consistency_label}).`
-      : `1 throw detected in this clip.`;
+      : `1 throw detected in this clip (${armLabel}).`;
 
     renderPictograph(analysis);
 
@@ -464,8 +487,10 @@
 
     resetCoachLog();
     if (video.analysis) {
+      setSelectedArm(video.analysis.arm);
       renderAnalysis(video.analysis);
     } else {
+      setSelectedArm("right");
       clearAnalysisPanel();
     }
 
@@ -626,6 +651,25 @@
   });
 
   /* ------------------------------------------------------------------ *
+   * Throwing arm selector
+   * ------------------------------------------------------------------ */
+
+  function setSelectedArm(arm) {
+    selectedArm = arm === "left" ? "left" : "right";
+    armSelect.querySelectorAll(".chip--arm").forEach((chip) => {
+      const active = chip.dataset.arm === selectedArm;
+      chip.classList.toggle("is-active", active);
+      chip.setAttribute("aria-checked", active ? "true" : "false");
+    });
+  }
+
+  armSelect.addEventListener("click", (e) => {
+    const chip = e.target.closest(".chip--arm");
+    if (!chip) return;
+    setSelectedArm(chip.dataset.arm);
+  });
+
+  /* ------------------------------------------------------------------ *
    * Analysis (Version 2: MediaPipe pose detection on the server)
    * ------------------------------------------------------------------ */
 
@@ -635,13 +679,14 @@
       return;
     }
     const targetId = activeVideoId;
+    const arm = selectedArm;
     analyzeBtn.disabled = true;
     analysisStatusPill.textContent = "Analyzing…";
     analysisStatusPill.className = "pill pill--soon";
     analysisNote.textContent = "Running AI pose detection — this can take a little while for longer clips.";
 
     try {
-      const res = await fetch(`/api/analyze/${targetId}`, { method: "POST" });
+      const res = await fetch(`/api/analyze/${targetId}?arm=${encodeURIComponent(arm)}`, { method: "POST" });
       const data = await res.json();
 
       if (!res.ok || data.status === "error") {
@@ -738,7 +783,7 @@
    * ------------------------------------------------------------------ */
 
   dropzone.addEventListener("click", (e) => {
-    if (e.target.closest("#upload-btn")) return; // button has its own handler
+    if (e.target.closest("#upload-btn") || e.target.closest("#record-btn")) return; // buttons have their own handlers
     fileInput.click();
   });
   dropzone.addEventListener("keydown", (e) => {
@@ -765,6 +810,138 @@
   dropzone.addEventListener("drop", (e) => {
     if (e.dataTransfer && e.dataTransfer.files.length) uploadFiles(e.dataTransfer.files);
   });
+
+  /* ------------------------------------------------------------------ *
+   * Record a throw directly from the camera (getUserMedia + MediaRecorder),
+   * then hand the recorded clip to the same uploadFiles() flow as a picked
+   * file — the backend doesn't need to know a video came from a webcam
+   * instead of a file picker.
+   * ------------------------------------------------------------------ */
+
+  function pickRecorderMimeType() {
+    const candidates = ["video/webm;codecs=vp9", "video/webm;codecs=vp8", "video/webm"];
+    if (typeof MediaRecorder === "undefined") return "";
+    return candidates.find((t) => MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(t)) || "";
+  }
+
+  function resetRecordUI() {
+    recordedChunks = [];
+    recordedBlob = null;
+    recordPreview.srcObject = mediaStream || null;
+    recordPreview.src = "";
+    recordPreview.muted = true;
+    recordPreview.controls = false;
+    recordIndicator.hidden = true;
+    recordStartBtn.hidden = false;
+    recordStopBtn.hidden = true;
+    recordRetakeBtn.hidden = true;
+    recordUseBtn.hidden = true;
+    recordHint.textContent = mediaStream
+      ? "Frame your throw, then hit Record."
+      : "Allow camera access, frame your throw, then hit Record.";
+  }
+
+  function startRecordTimer() {
+    recordStartedAt = Date.now();
+    recordTimerEl.textContent = "00:00";
+    recordTimerInterval = setInterval(() => {
+      const secs = Math.floor((Date.now() - recordStartedAt) / 1000);
+      recordTimerEl.textContent = formatTime(secs).slice(0, 5);
+    }, 250);
+  }
+
+  function stopRecordTimer() {
+    clearInterval(recordTimerInterval);
+    recordTimerInterval = null;
+  }
+
+  async function openRecordModal() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      showToast("This browser doesn't support camera recording.");
+      return;
+    }
+    recordModal.hidden = false;
+    resetRecordUI();
+    try {
+      mediaStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+      recordPreview.srcObject = mediaStream;
+      recordHint.textContent = "Frame your throw, then hit Record.";
+    } catch (err) {
+      recordHint.textContent = "Camera access was denied or unavailable — check your browser/OS camera permissions.";
+    }
+  }
+
+  function closeRecordModal() {
+    stopRecordTimer();
+    if (mediaRecorder && mediaRecorder.state !== "inactive") mediaRecorder.stop();
+    mediaRecorder = null;
+    if (mediaStream) {
+      mediaStream.getTracks().forEach((track) => track.stop());
+      mediaStream = null;
+    }
+    recordModal.hidden = true;
+  }
+
+  recordStartBtn.addEventListener("click", () => {
+    if (!mediaStream) {
+      showToast("Camera isn't ready yet.");
+      return;
+    }
+    recordedChunks = [];
+    const mimeType = pickRecorderMimeType();
+    try {
+      mediaRecorder = mimeType ? new MediaRecorder(mediaStream, { mimeType }) : new MediaRecorder(mediaStream);
+    } catch (err) {
+      showToast("Recording isn't supported in this browser.");
+      return;
+    }
+
+    mediaRecorder.ondataavailable = (e) => { if (e.data.size > 0) recordedChunks.push(e.data); };
+    mediaRecorder.onstop = () => {
+      recordedBlob = new Blob(recordedChunks, { type: mediaRecorder.mimeType || "video/webm" });
+      recordPreview.srcObject = null;
+      recordPreview.src = URL.createObjectURL(recordedBlob);
+      recordPreview.muted = false;
+      recordPreview.controls = true;
+      recordPreview.play();
+    };
+
+    mediaRecorder.start();
+    startRecordTimer();
+    recordIndicator.hidden = false;
+    recordStartBtn.hidden = true;
+    recordStopBtn.hidden = false;
+    recordHint.textContent = "Recording… hit Stop when the throw is done.";
+  });
+
+  recordStopBtn.addEventListener("click", () => {
+    if (mediaRecorder && mediaRecorder.state !== "inactive") mediaRecorder.stop();
+    stopRecordTimer();
+    recordIndicator.hidden = true;
+    recordStopBtn.hidden = true;
+    recordRetakeBtn.hidden = false;
+    recordUseBtn.hidden = false;
+    recordHint.textContent = "Preview your recording, then use it or retake.";
+  });
+
+  recordRetakeBtn.addEventListener("click", () => {
+    resetRecordUI();
+  });
+
+  recordUseBtn.addEventListener("click", async () => {
+    if (!recordedBlob) return;
+    const file = new File([recordedBlob], `throw-recording-${Date.now()}.webm`, {
+      type: recordedBlob.type || "video/webm",
+    });
+    closeRecordModal();
+    await uploadFiles([file]);
+  });
+
+  recordCancelBtn.addEventListener("click", closeRecordModal);
+  recordModal.addEventListener("click", (e) => { if (e.target === recordModal) closeRecordModal(); });
+
+  recordBtn.addEventListener("click", openRecordModal);
+  recordMoreBtn.addEventListener("click", openRecordModal);
 
   /* ------------------------------------------------------------------ *
    * Keyboard shortcuts (space to play/pause, arrows to step frames)

@@ -29,17 +29,17 @@ class CoachError(Exception):
     """Raised when a question can't be answered (bad mode, missing key, API error)."""
 
 
-def _throw_summary_text(throw):
-    elbow = throw["right_elbow"]
-    wrist = throw["right_wrist"]
+def _throw_summary_text(throw, arm):
+    elbow = throw["elbow"]
+    wrist = throw["wrist"]
     overall = throw["overall"]
     direction = elbow.get("direction") or {}
     lines = [
         f"Throw #{throw['throw_number']}:",
-        f"  Right elbow stability: {elbow['score']}% ({elbow['label']}), "
+        f"  {arm.capitalize()} elbow stability: {elbow['score']}% ({elbow['label']}), "
         f"angle ranged {elbow['angle_min']}-{elbow['angle_max']} deg (avg {elbow['angle_avg']}).",
         f"  Elbow movement: {direction.get('summary', 'not enough data')}.",
-        f"  Right wrist snap: {wrist['score']}% ({wrist['label']}), "
+        f"  {arm.capitalize()} wrist snap: {wrist['score']}% ({wrist['label']}), "
         f"peak speed {wrist['peak_speed_pct_per_sec']} (% of frame diagonal per second).",
         f"  Release: frame {throw['release_frame']} at {throw['release_time']}s.",
         f"  Overall score: {overall['score']}% ({overall['label']}).",
@@ -48,7 +48,8 @@ def _throw_summary_text(throw):
 
 
 def _analysis_context_text(analysis):
-    parts = [_throw_summary_text(t) for t in analysis["throws"]]
+    arm = analysis.get("arm", "right")
+    parts = [_throw_summary_text(t, arm) for t in analysis["throws"]]
     comparison = analysis["comparison"]
     parts.append(
         f"\nAcross all {analysis['throw_count']} throw(s): average score "
@@ -66,6 +67,7 @@ def _analysis_context_text(analysis):
 
 def rule_based_answer(question, analysis):
     q = question.lower()
+    arm = analysis.get("arm", "right")
     throws = analysis["throws"]
     best = max(throws, key=lambda t: t["overall"]["score"])
     worst = min(throws, key=lambda t: t["overall"]["score"])
@@ -74,7 +76,7 @@ def rule_based_answer(question, analysis):
     # since almost every direction question also mentions "elbow" (e.g. "which
     # way does my elbow move") and would otherwise never reach this branch.
     if any(w in q for w in ("direction", "left", "right", "up", "down", "move", "drift", "sideways")):
-        e = best["right_elbow"]
+        e = best["elbow"]
         direction = e.get("direction")
         if not direction:
             return "Not enough tracked frames to tell which way the elbow moved on this throw."
@@ -85,19 +87,19 @@ def rule_based_answer(question, analysis):
         )
 
     if any(w in q for w in ("elbow",)):
-        e = best["right_elbow"]
+        e = best["elbow"]
         direction = (e.get("direction") or {}).get("summary", "no clear direction detected")
         return (
-            f"On your best throw (#{best['throw_number']}), elbow stability scored "
+            f"On your best throw (#{best['throw_number']}), {arm} elbow stability scored "
             f"{e['score']}% ({e['label']}). The angle ranged from {e['angle_min']} to "
             f"{e['angle_max']} degrees. {direction}. A tighter angle range usually means "
             f"a more repeatable throw."
         )
 
     if any(w in q for w in ("wrist", "snap", "release")):
-        w_ = best["right_wrist"]
+        w_ = best["wrist"]
         return (
-            f"On your best throw (#{best['throw_number']}), wrist snap scored "
+            f"On your best throw (#{best['throw_number']}), {arm} wrist snap scored "
             f"{w_['score']}% ({w_['label']}), with a peak speed of "
             f"{w_['peak_speed_pct_per_sec']} (measured as % of the frame diagonal per second). "
             f"Release happened at frame {best['release_frame']} ({best['release_time']}s)."

@@ -98,8 +98,8 @@ $env:ANTHROPIC_API_KEY = "sk-ant-..."
 python app.py
 ```
 
-Then open **http://localhost:5000** in your browser. Set the `PORT` env var
-to run on a different port if 5000 is already in use.
+Then open **http://localhost:5050** in your browser. Set the `PORT` env var
+to run on a different port if 5050 is already in use.
 
 ## Run — desktop app
 

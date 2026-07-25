@@ -315,5 +315,9 @@ def coach(video_id):
 
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
+    # 5050, not 5000 — this machine's other local app (Teacher Toolkit)
+    # hardcodes port 5000, and whichever process starts first wins that
+    # port silently, leaving the other's API calls failing with no obvious
+    # cause. Still overridable via the PORT env var (e.g. on Render).
+    port = int(os.environ.get("PORT", 5050))
     app.run(debug=True, host="0.0.0.0", port=port, threaded=True)

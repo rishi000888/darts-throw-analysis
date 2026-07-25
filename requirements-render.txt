@@ -1,0 +1,10 @@
+# Dependencies for the Render web deployment only (see render.yaml /
+# Dockerfile). Kept separate from requirements.txt so local dev still
+# installs pywebview for desktop.py, which Render never needs and which
+# would otherwise require extra system GTK/WebKit packages in the image.
+
+Flask==3.0.3
+Werkzeug==3.0.3
+mediapipe==0.10.35
+anthropic
+gunicorn==22.0.0

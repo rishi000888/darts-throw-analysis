@@ -1,0 +1,17 @@
+Flask==3.0.3
+Werkzeug==3.0.3
+
+# mediapipe pulls in opencv-contrib-python as a dependency, which is what
+# both video metadata reading (app.py) and pose analysis (pose_analysis.py)
+# use for cv2 — don't also install opencv-python-headless, two OpenCV
+# distributions in one venv conflict.
+mediapipe==0.10.35
+
+# Ask AI coaching box — optional "AI Chat" mode (Quick Answers mode needs
+# nothing beyond this package being importable; the API key is separate,
+# see README).
+anthropic
+
+# Desktop app (desktop.py) — wraps app.py in a native window instead of a
+# browser tab. Not needed if you only ever run `python app.py`.
+pywebview

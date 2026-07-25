@@ -1,0 +1,789 @@
+/**
+ * Darts Throw Analysis AI — Phase 1 frontend
+ *
+ * Responsible for:
+ *   - Uploading videos (drag & drop or file picker) to /api/upload
+ *   - Rendering the video library and wiring select / rename / delete
+ *   - Driving the custom video player: play/pause/stop, frame stepping,
+ *     timeline scrubbing, volume, fullscreen
+ *   - The 0.10x-2.00x playback speed slider
+ *   - Showing the "coming in Version 2" message for analysis
+ *
+ * No pose detection or scoring logic lives here yet — the Analysis panel
+ * only ever shows placeholders in Phase 1.
+ */
+
+(() => {
+  "use strict";
+
+  const MAX_VIDEOS = 5;
+
+  /* ------------------------------------------------------------------ *
+   * Element references
+   * ------------------------------------------------------------------ */
+
+  const dropzone = document.getElementById("dropzone");
+  const fileInput = document.getElementById("file-input");
+  const uploadBtn = document.getElementById("upload-btn");
+  const addMoreBtn = document.getElementById("add-more-btn");
+  const uploadFeedback = document.getElementById("upload-feedback");
+
+  const hero = document.getElementById("hero");
+  const workspace = document.getElementById("workspace");
+
+  const libraryGrid = document.getElementById("library-grid");
+  const libraryCount = document.getElementById("library-count");
+  const videoCountPill = document.getElementById("video-count-pill");
+
+  const videoEl = document.getElementById("video-player");
+  const stageEmpty = document.getElementById("stage-empty");
+  const fullscreenBtn = document.getElementById("fullscreen-btn");
+
+  const timelineTrack = document.getElementById("timeline-track");
+  const timelineProgress = document.getElementById("timeline-progress");
+  const timelineHandle = document.getElementById("timeline-handle");
+  const releaseMarker = document.getElementById("release-marker");
+  const currentTimeEl = document.getElementById("current-time");
+  const totalTimeEl = document.getElementById("total-time");
+  const frameReadout = document.getElementById("frame-readout");
+
+  const playBtn = document.getElementById("play-btn");
+  const playIcon = document.getElementById("play-icon");
+  const stopBtn = document.getElementById("stop-btn");
+  const prevFrameBtn = document.getElementById("prev-frame-btn");
+  const nextFrameBtn = document.getElementById("next-frame-btn");
+  const muteBtn = document.getElementById("mute-btn");
+  const volumeSlider = document.getElementById("volume-slider");
+
+  const speedSlider = document.getElementById("speed-slider");
+  const speedValue = document.getElementById("speed-value");
+  const speedPresets = document.getElementById("speed-presets");
+
+  const analyzeBtn = document.getElementById("analyze-btn");
+  const analysisStatusPill = document.getElementById("analysis-status-pill");
+  const analysisElbow = document.getElementById("analysis-elbow");
+  const analysisElbowDirection = document.getElementById("analysis-elbow-direction");
+  const analysisWrist = document.getElementById("analysis-wrist");
+  const analysisRelease = document.getElementById("analysis-release");
+  const analysisOverall = document.getElementById("analysis-overall");
+  const analysisNote = document.getElementById("analysis-note");
+  const comparisonSummary = document.getElementById("comparison-summary");
+  const throwPictograph = document.getElementById("throw-pictograph");
+
+  const coachModeGroup = document.getElementById("coach-mode");
+  const coachLog = document.getElementById("coach-log");
+  const coachLogEmpty = document.getElementById("coach-log-empty");
+  const coachForm = document.getElementById("coach-form");
+  const coachInput = document.getElementById("coach-input");
+  const coachSend = document.getElementById("coach-send");
+
+  const infoFilename = document.getElementById("info-filename");
+  const infoResolution = document.getElementById("info-resolution");
+  const infoFps = document.getElementById("info-fps");
+  const infoDuration = document.getElementById("info-duration");
+  const infoSize = document.getElementById("info-size");
+
+  const renameModal = document.getElementById("rename-modal");
+  const renameInput = document.getElementById("rename-input");
+  const renameCancel = document.getElementById("rename-cancel");
+  const renameConfirm = document.getElementById("rename-confirm");
+
+  const toastEl = document.getElementById("toast");
+
+  /* ------------------------------------------------------------------ *
+   * State
+   * ------------------------------------------------------------------ */
+
+  let library = [];          // list of video metadata objects from the server
+  let activeVideoId = null;  // id of the video currently loaded in the player
+  let renameTargetId = null; // id of the video being renamed via the modal
+  let isScrubbing = false;
+  let toastTimer = null;
+  let selectedThrowIndex = 0;  // which throw's detail is shown, within the active video's analysis.throws
+  let coachMode = "rule";      // "rule" | "llm"
+  let coachBusy = false;
+
+  /* ------------------------------------------------------------------ *
+   * Helpers
+   * ------------------------------------------------------------------ */
+
+  function showToast(message, duration = 2600) {
+    toastEl.textContent = message;
+    toastEl.hidden = false;
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => { toastEl.hidden = true; }, duration);
+  }
+
+  function setUploadFeedback(message, kind) {
+    uploadFeedback.textContent = message || "";
+    uploadFeedback.classList.remove("is-error", "is-success");
+    if (kind) uploadFeedback.classList.add(kind === "error" ? "is-error" : "is-success");
+  }
+
+  function formatTime(seconds) {
+    if (!isFinite(seconds) || seconds < 0) seconds = 0;
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds - mins * 60;
+    return `${String(mins).padStart(2, "0")}:${secs.toFixed(2).padStart(5, "0")}`;
+  }
+
+  function activeVideo() {
+    return library.find((v) => v.id === activeVideoId) || null;
+  }
+
+  function frameDuration(video) {
+    // Seconds per frame, used for frame-stepping and the frame counter.
+    const fps = video && video.fps ? video.fps : 30;
+    return 1 / fps;
+  }
+
+  /* ------------------------------------------------------------------ *
+   * Library rendering
+   * ------------------------------------------------------------------ */
+
+  function renderLibrary() {
+    libraryGrid.innerHTML = "";
+
+    if (library.length === 0) {
+      libraryGrid.innerHTML = `<p class="library__empty">No throws uploaded yet.</p>`;
+    }
+
+    library.forEach((video) => {
+      const card = document.createElement("div");
+      card.className = "video-card" + (video.id === activeVideoId ? " is-active" : "");
+      card.dataset.id = video.id;
+      card.setAttribute("role", "button");
+      card.setAttribute("tabindex", "0");
+
+      card.innerHTML = `
+        <img class="video-card__thumb" src="${video.thumbnail_url}" alt="" loading="lazy">
+        <div class="video-card__meta">
+          <div class="video-card__name">${escapeHtml(video.display_name)}</div>
+          <div class="video-card__sub">${formatTime(video.duration)} &middot; ${video.file_size_readable}</div>
+        </div>
+        <div class="video-card__actions">
+          <button class="video-card__icon-btn rename" title="Rename" aria-label="Rename">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
+          <button class="video-card__icon-btn delete" title="Delete" aria-label="Delete">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
+        </div>
+      `;
+
+      card.addEventListener("click", (e) => {
+        if (e.target.closest(".rename")) { openRenameModal(video.id); return; }
+        if (e.target.closest(".delete")) { deleteVideo(video.id); return; }
+        loadVideo(video.id);
+      });
+      card.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); loadVideo(video.id); }
+      });
+
+      libraryGrid.appendChild(card);
+    });
+
+    libraryCount.textContent = `${library.length} / ${MAX_VIDEOS}`;
+    videoCountPill.textContent = `${library.length} / ${MAX_VIDEOS} throws loaded`;
+    addMoreBtn.disabled = library.length >= MAX_VIDEOS;
+    addMoreBtn.style.opacity = library.length >= MAX_VIDEOS ? 0.5 : 1;
+  }
+
+  function escapeHtml(str) {
+    const div = document.createElement("div");
+    div.textContent = str;
+    return div.innerHTML;
+  }
+
+  /* ------------------------------------------------------------------ *
+   * Fetching / uploading
+   * ------------------------------------------------------------------ */
+
+  async function fetchLibrary() {
+    const res = await fetch("/api/videos");
+    library = await res.json();
+    renderLibrary();
+    if (library.length > 0) {
+      workspace.hidden = false;
+      if (!activeVideoId) loadVideo(library[0].id);
+    }
+  }
+
+  async function uploadFiles(fileList) {
+    const files = Array.from(fileList);
+    if (files.length === 0) return;
+
+    const remaining = MAX_VIDEOS - library.length;
+    if (remaining <= 0) {
+      setUploadFeedback(`You already have the maximum of ${MAX_VIDEOS} throws. Delete one to add another.`, "error");
+      return;
+    }
+
+    const toSend = files.slice(0, remaining);
+    if (files.length > remaining) {
+      setUploadFeedback(`Only ${remaining} more video(s) can be added — uploading the first ${remaining}.`, "error");
+    } else {
+      setUploadFeedback("Uploading...", null);
+    }
+
+    const formData = new FormData();
+    toSend.forEach((f) => formData.append("videos", f));
+
+    uploadBtn.disabled = true;
+    try {
+      const res = await fetch("/api/upload", { method: "POST", body: formData });
+      const data = await res.json();
+
+      if (data.created && data.created.length > 0) {
+        setUploadFeedback(`${data.created.length} throw(s) uploaded.`, "success");
+        showToast(`${data.created.length} video(s) added to your library.`);
+      }
+      if (data.errors && data.errors.length > 0) {
+        setUploadFeedback(data.errors.join(" "), "error");
+      }
+      if ((!data.created || data.created.length === 0) && (!data.errors || data.errors.length === 0)) {
+        setUploadFeedback(data.error || "Upload failed.", "error");
+      }
+
+      await fetchLibrary();
+      workspace.hidden = false;
+      if (data.created && data.created.length > 0) {
+        loadVideo(data.created[data.created.length - 1].id);
+        workspace.scrollIntoView({ behavior: "smooth", block: "start" });
+      }
+    } catch (err) {
+      setUploadFeedback("Upload failed — check your connection and try again.", "error");
+    } finally {
+      uploadBtn.disabled = false;
+      fileInput.value = "";
+    }
+  }
+
+  async function deleteVideo(id) {
+    const video = library.find((v) => v.id === id);
+    if (!video) return;
+    if (!confirm(`Delete "${video.display_name}"? This can't be undone.`)) return;
+
+    await fetch(`/api/videos/${id}`, { method: "DELETE" });
+    if (activeVideoId === id) {
+      activeVideoId = null;
+      videoEl.removeAttribute("src");
+      stageEmpty.hidden = false;
+      clearInfoPanel();
+      clearAnalysisPanel();
+    }
+    await fetchLibrary();
+    showToast("Throw deleted.");
+  }
+
+  async function renameVideo(id, newName) {
+    const res = await fetch(`/api/videos/${id}/rename`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ display_name: newName }),
+    });
+    if (res.ok) {
+      await fetchLibrary();
+      showToast("Throw renamed.");
+    }
+  }
+
+  /* ------------------------------------------------------------------ *
+   * Rename modal
+   * ------------------------------------------------------------------ */
+
+  function openRenameModal(id) {
+    const video = library.find((v) => v.id === id);
+    if (!video) return;
+    renameTargetId = id;
+    renameInput.value = video.display_name;
+    renameModal.hidden = false;
+    renameInput.focus();
+    renameInput.select();
+  }
+
+  function closeRenameModal() {
+    renameModal.hidden = true;
+    renameTargetId = null;
+  }
+
+  renameCancel.addEventListener("click", closeRenameModal);
+  renameModal.addEventListener("click", (e) => { if (e.target === renameModal) closeRenameModal(); });
+  renameConfirm.addEventListener("click", () => {
+    const value = renameInput.value.trim();
+    if (value && renameTargetId) renameVideo(renameTargetId, value);
+    closeRenameModal();
+  });
+  renameInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") renameConfirm.click();
+    if (e.key === "Escape") closeRenameModal();
+  });
+
+  /* ------------------------------------------------------------------ *
+   * Player: loading a video + info panel
+   * ------------------------------------------------------------------ */
+
+  function clearInfoPanel() {
+    infoFilename.textContent = "—";
+    infoResolution.textContent = "—";
+    infoFps.textContent = "—";
+    infoDuration.textContent = "—";
+    infoSize.textContent = "—";
+  }
+
+  /* ------------------------------------------------------------------ *
+   * Throw Analysis panel (Version 2: real pose-detection results)
+   * ------------------------------------------------------------------ */
+
+  const SCORE_CLASS_BY_LABEL = {
+    "Excellent": "score--excellent",
+    "Very Good": "score--very-good",
+    "Good": "score--good",
+    "Needs Work": "score--needs-work",
+  };
+
+  function scoreClass(label) {
+    return SCORE_CLASS_BY_LABEL[label] || "";
+  }
+
+  function clearAnalysisPanel() {
+    [analysisElbow, analysisElbowDirection, analysisWrist, analysisRelease, analysisOverall].forEach((el) => {
+      el.textContent = "––";
+      el.className = el === analysisOverall ? "placeholder placeholder--score" : "placeholder";
+    });
+    analysisStatusPill.textContent = "Not analyzed";
+    analysisStatusPill.className = "pill pill--soon";
+    analysisNote.textContent = 'Click "Start Analysis" below to run AI pose detection on this throw.';
+    releaseMarker.hidden = true;
+    comparisonSummary.hidden = true;
+    throwPictograph.hidden = true;
+    throwPictograph.innerHTML = "";
+    selectedThrowIndex = 0;
+    resetCoachLog();
+  }
+
+  function renderThrowDetail(throw_) {
+    const elbow = throw_.right_elbow;
+    const wrist = throw_.right_wrist;
+    const overall = throw_.overall;
+
+    analysisElbow.textContent = `${elbow.score}% — ${elbow.label}`;
+    analysisElbow.className = `mono ${scoreClass(elbow.label)}`;
+
+    analysisElbowDirection.textContent = elbow.direction ? elbow.direction.summary : "Not enough data";
+    analysisElbowDirection.className = "mono";
+
+    analysisWrist.textContent = `${wrist.score}% — ${wrist.label}`;
+    analysisWrist.className = `mono ${scoreClass(wrist.label)}`;
+
+    analysisRelease.textContent = `Frame ${throw_.release_frame} (${throw_.release_time.toFixed(2)}s)`;
+    analysisRelease.className = "mono";
+
+    analysisOverall.textContent = `${overall.score}%`;
+    analysisOverall.className = `placeholder--score ${scoreClass(overall.label)}`;
+
+    analysisStatusPill.textContent = overall.label;
+    analysisStatusPill.className = `pill ${scoreClass(overall.label)}`;
+
+    const video = activeVideo();
+    const duration = (video && video.duration) || videoEl.duration || 0;
+    if (duration > 0) {
+      const pct = Math.min(100, (throw_.release_time / duration) * 100);
+      releaseMarker.style.left = `${pct}%`;
+      releaseMarker.title = `Throw #${throw_.throw_number} release (${throw_.release_time.toFixed(2)}s)`;
+      releaseMarker.hidden = false;
+    }
+  }
+
+  function selectThrow(index) {
+    const video = activeVideo();
+    if (!video || !video.analysis) return;
+    selectedThrowIndex = Math.max(0, Math.min(index, video.analysis.throws.length - 1));
+    renderThrowDetail(video.analysis.throws[selectedThrowIndex]);
+    throwPictograph.querySelectorAll(".pictograph__bar").forEach((bar, i) => {
+      bar.classList.toggle("is-selected", i === selectedThrowIndex);
+      bar.setAttribute("aria-selected", i === selectedThrowIndex ? "true" : "false");
+    });
+  }
+
+  function renderPictograph(analysis) {
+    throwPictograph.innerHTML = "";
+    throwPictograph.hidden = analysis.throws.length < 2;
+
+    analysis.throws.forEach((throw_, i) => {
+      const bar = document.createElement("button");
+      bar.type = "button";
+      bar.className = `pictograph__bar ${scoreClass(throw_.overall.label)}`;
+      bar.setAttribute("role", "option");
+      bar.setAttribute("aria-selected", "false");
+      bar.title = `Throw #${throw_.throw_number}: ${throw_.overall.score}% (${throw_.overall.label})`;
+      bar.innerHTML = `
+        <span class="pictograph__value">${throw_.overall.score}</span>
+        <span class="pictograph__fill" style="height:${Math.max(4, throw_.overall.score)}%"></span>
+        <span class="pictograph__label">#${throw_.throw_number}</span>
+      `;
+      bar.addEventListener("click", () => selectThrow(i));
+      throwPictograph.appendChild(bar);
+    });
+  }
+
+  function renderAnalysis(analysis) {
+    const c = analysis.comparison;
+    comparisonSummary.hidden = false;
+    comparisonSummary.textContent = analysis.throw_count > 1
+      ? `${analysis.throw_count} throws detected — average ${c.average_score}% (${c.average_label}), ` +
+        `best #${c.best_throw_number}, consistency ${c.consistency_score}% (${c.consistency_label}).`
+      : `1 throw detected in this clip.`;
+
+    renderPictograph(analysis);
+
+    const bestIndex = analysis.throws.findIndex((t) => t.throw_number === c.best_throw_number);
+    selectThrow(bestIndex >= 0 ? bestIndex : 0);
+
+    analysisNote.textContent = `Based on ${analysis.frames_with_pose} tracked frames across ${analysis.throw_count} throw(s).`;
+  }
+
+  function loadVideo(id) {
+    const video = library.find((v) => v.id === id);
+    if (!video) return;
+
+    activeVideoId = id;
+    videoEl.src = video.video_url;
+    videoEl.playbackRate = parseFloat(speedSlider.value);
+    stageEmpty.hidden = true;
+
+    infoFilename.textContent = video.display_name;
+    infoResolution.textContent = `${video.width} × ${video.height}`;
+    infoFps.textContent = video.fps ? video.fps.toFixed(2) : "—";
+    infoDuration.textContent = `${video.duration.toFixed(1)} sec`;
+    infoSize.textContent = video.file_size_readable;
+
+    totalTimeEl.textContent = formatTime(video.duration);
+    updateFrameReadout(0);
+    updateTimelineUI(0);
+
+    resetCoachLog();
+    if (video.analysis) {
+      renderAnalysis(video.analysis);
+    } else {
+      clearAnalysisPanel();
+    }
+
+    renderLibrary();
+  }
+
+  function updateFrameReadout(currentTime) {
+    const video = activeVideo();
+    const fps = video && video.fps ? video.fps : 30;
+    const totalFrames = video ? video.frame_count : 0;
+    const currentFrame = Math.min(totalFrames, Math.round(currentTime * fps));
+    frameReadout.textContent = `Frame ${currentFrame} / ${totalFrames}`;
+  }
+
+  function updateTimelineUI(currentTime) {
+    const video = activeVideo();
+    const duration = (video && video.duration) || videoEl.duration || 0;
+    const pct = duration > 0 ? Math.min(100, (currentTime / duration) * 100) : 0;
+    timelineProgress.style.width = `${pct}%`;
+    timelineHandle.style.left = `${pct}%`;
+    currentTimeEl.textContent = formatTime(currentTime);
+  }
+
+  /* ------------------------------------------------------------------ *
+   * Transport controls
+   * ------------------------------------------------------------------ */
+
+  function togglePlay() {
+    if (!videoEl.src) return;
+    if (videoEl.paused) videoEl.play(); else videoEl.pause();
+  }
+
+  playBtn.addEventListener("click", togglePlay);
+
+  videoEl.addEventListener("play", () => {
+    playIcon.innerHTML = '<rect x="6" y="5" width="4" height="14" rx="1"></rect><rect x="14" y="5" width="4" height="14" rx="1"></rect>';
+  });
+  videoEl.addEventListener("pause", () => {
+    playIcon.innerHTML = '<path d="M8 5v14l11-7z"></path>';
+  });
+
+  stopBtn.addEventListener("click", () => {
+    if (!videoEl.src) return;
+    videoEl.pause();
+    videoEl.currentTime = 0;
+  });
+
+  prevFrameBtn.addEventListener("click", () => {
+    if (!videoEl.src) return;
+    videoEl.pause();
+    const step = frameDuration(activeVideo());
+    videoEl.currentTime = Math.max(0, videoEl.currentTime - step);
+  });
+
+  nextFrameBtn.addEventListener("click", () => {
+    if (!videoEl.src) return;
+    videoEl.pause();
+    const step = frameDuration(activeVideo());
+    const duration = videoEl.duration || Infinity;
+    videoEl.currentTime = Math.min(duration, videoEl.currentTime + step);
+  });
+
+  videoEl.addEventListener("timeupdate", () => {
+    if (isScrubbing) return;
+    updateTimelineUI(videoEl.currentTime);
+    updateFrameReadout(videoEl.currentTime);
+  });
+
+  videoEl.addEventListener("loadedmetadata", () => {
+    if (!activeVideo()) totalTimeEl.textContent = formatTime(videoEl.duration);
+  });
+
+  /* Fullscreen */
+
+  fullscreenBtn.addEventListener("click", () => {
+    const stage = document.querySelector(".player-card__stage");
+    if (document.fullscreenElement) {
+      document.exitFullscreen();
+    } else if (stage.requestFullscreen) {
+      stage.requestFullscreen();
+    }
+  });
+
+  /* Volume */
+
+  muteBtn.addEventListener("click", () => {
+    videoEl.muted = !videoEl.muted;
+    updateVolumeIcon();
+  });
+
+  volumeSlider.addEventListener("input", () => {
+    videoEl.volume = parseFloat(volumeSlider.value);
+    videoEl.muted = videoEl.volume === 0;
+    updateVolumeIcon();
+  });
+
+  function updateVolumeIcon() {
+    const icon = document.getElementById("volume-icon");
+    if (videoEl.muted || videoEl.volume === 0) {
+      icon.innerHTML = '<path d="M4 9v6h4l5 5V4L8 9H4z"></path><path d="M18 9l-5 6M13 9l5 6" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round"></path>';
+    } else {
+      icon.innerHTML = '<path d="M4 9v6h4l5 5V4L8 9H4z"></path><path d="M16 8.5a4.5 4.5 0 0 1 0 7" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round"></path>';
+    }
+  }
+
+  /* ------------------------------------------------------------------ *
+   * Timeline scrubbing
+   * ------------------------------------------------------------------ */
+
+  function seekFromClientX(clientX) {
+    const rect = timelineTrack.getBoundingClientRect();
+    const ratio = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
+    const duration = videoEl.duration || (activeVideo() ? activeVideo().duration : 0);
+    const time = ratio * duration;
+    updateTimelineUI(time);
+    updateFrameReadout(time);
+    return time;
+  }
+
+  timelineTrack.addEventListener("pointerdown", (e) => {
+    if (!videoEl.src) return;
+    isScrubbing = true;
+    timelineTrack.setPointerCapture(e.pointerId);
+    videoEl.currentTime = seekFromClientX(e.clientX);
+  });
+
+  timelineTrack.addEventListener("pointermove", (e) => {
+    if (!isScrubbing) return;
+    videoEl.currentTime = seekFromClientX(e.clientX);
+  });
+
+  timelineTrack.addEventListener("pointerup", (e) => {
+    isScrubbing = false;
+    timelineTrack.releasePointerCapture(e.pointerId);
+  });
+
+  /* ------------------------------------------------------------------ *
+   * Playback speed (0.10x – 2.00x)
+   * ------------------------------------------------------------------ */
+
+  function applySpeed(value) {
+    const speed = Math.min(2, Math.max(0.1, parseFloat(value)));
+    videoEl.playbackRate = speed;
+    speedValue.textContent = `${speed.toFixed(2)}×`;
+    speedSlider.value = speed;
+
+    speedPresets.querySelectorAll(".chip").forEach((chip) => {
+      chip.classList.toggle("is-active", parseFloat(chip.dataset.speed) === speed);
+    });
+  }
+
+  speedSlider.addEventListener("input", () => applySpeed(speedSlider.value));
+
+  speedPresets.addEventListener("click", (e) => {
+    const chip = e.target.closest(".chip");
+    if (!chip) return;
+    applySpeed(chip.dataset.speed);
+  });
+
+  /* ------------------------------------------------------------------ *
+   * Analysis (Version 2: MediaPipe pose detection on the server)
+   * ------------------------------------------------------------------ */
+
+  analyzeBtn.addEventListener("click", async () => {
+    if (!activeVideoId) {
+      showToast("Select a throw first.");
+      return;
+    }
+    const targetId = activeVideoId;
+    analyzeBtn.disabled = true;
+    analysisStatusPill.textContent = "Analyzing…";
+    analysisStatusPill.className = "pill pill--soon";
+    analysisNote.textContent = "Running AI pose detection — this can take a little while for longer clips.";
+
+    try {
+      const res = await fetch(`/api/analyze/${targetId}`, { method: "POST" });
+      const data = await res.json();
+
+      if (!res.ok || data.status === "error") {
+        analysisNote.textContent = data.message || "Analysis failed. Try a clearer video.";
+        analysisStatusPill.textContent = "Failed";
+        analysisStatusPill.className = "pill";
+        showToast(data.message || "Analysis failed.");
+        return;
+      }
+
+      const entry = library.find((v) => v.id === targetId);
+      if (entry) entry.analysis = data.analysis;
+
+      if (targetId === activeVideoId) renderAnalysis(data.analysis);
+      showToast(data.cached ? "Showing cached analysis." : "Analysis complete.");
+    } catch (err) {
+      analysisNote.textContent = "Analysis failed — check your connection and try again.";
+      analysisStatusPill.textContent = "Failed";
+      analysisStatusPill.className = "pill";
+      showToast("Analysis failed.");
+    } finally {
+      analyzeBtn.disabled = false;
+    }
+  });
+
+  /* ------------------------------------------------------------------ *
+   * Ask AI (coaching Q&A over the computed analysis)
+   * ------------------------------------------------------------------ */
+
+  function resetCoachLog() {
+    coachLog.innerHTML = "";
+    coachLogEmpty.textContent = 'Analyze a throw, then ask about your elbow, wrist, direction, or how your throws compare.';
+    coachLog.appendChild(coachLogEmpty);
+  }
+
+  function appendCoachMessage(role, text) {
+    if (coachLogEmpty.parentNode) coachLogEmpty.remove();
+    const bubble = document.createElement("div");
+    bubble.className = `coach-msg coach-msg--${role}`;
+    bubble.textContent = text;
+    coachLog.appendChild(bubble);
+    coachLog.scrollTop = coachLog.scrollHeight;
+  }
+
+  coachModeGroup.addEventListener("click", (e) => {
+    const btn = e.target.closest(".coach-mode__btn");
+    if (!btn) return;
+    coachMode = btn.dataset.mode;
+    coachModeGroup.querySelectorAll(".coach-mode__btn").forEach((b) => {
+      const active = b === btn;
+      b.classList.toggle("is-active", active);
+      b.setAttribute("aria-checked", active ? "true" : "false");
+    });
+  });
+
+  coachForm.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const question = coachInput.value.trim();
+    if (!question || coachBusy) return;
+
+    const video = activeVideo();
+    if (!video || !video.analysis) {
+      showToast("Analyze this throw first.");
+      return;
+    }
+
+    appendCoachMessage("user", question);
+    coachInput.value = "";
+    coachBusy = true;
+    coachSend.disabled = true;
+
+    try {
+      const res = await fetch(`/api/coach/${video.id}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ question, mode: coachMode }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        appendCoachMessage("error", data.error || "Couldn't get an answer.");
+      } else {
+        appendCoachMessage("assistant", data.answer);
+      }
+    } catch (err) {
+      appendCoachMessage("error", "Request failed — check your connection and try again.");
+    } finally {
+      coachBusy = false;
+      coachSend.disabled = false;
+    }
+  });
+
+  /* ------------------------------------------------------------------ *
+   * Upload wiring: dropzone, file picker, drag & drop
+   * ------------------------------------------------------------------ */
+
+  dropzone.addEventListener("click", (e) => {
+    if (e.target.closest("#upload-btn")) return; // button has its own handler
+    fileInput.click();
+  });
+  dropzone.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); fileInput.click(); }
+  });
+
+  uploadBtn.addEventListener("click", (e) => { e.stopPropagation(); fileInput.click(); });
+  addMoreBtn.addEventListener("click", () => fileInput.click());
+
+  fileInput.addEventListener("change", () => uploadFiles(fileInput.files));
+
+  ["dragenter", "dragover"].forEach((evt) => {
+    dropzone.addEventListener(evt, (e) => {
+      e.preventDefault();
+      dropzone.classList.add("is-dragover");
+    });
+  });
+  ["dragleave", "drop"].forEach((evt) => {
+    dropzone.addEventListener(evt, (e) => {
+      e.preventDefault();
+      dropzone.classList.remove("is-dragover");
+    });
+  });
+  dropzone.addEventListener("drop", (e) => {
+    if (e.dataTransfer && e.dataTransfer.files.length) uploadFiles(e.dataTransfer.files);
+  });
+
+  /* ------------------------------------------------------------------ *
+   * Keyboard shortcuts (space to play/pause, arrows to step frames)
+   * ------------------------------------------------------------------ */
+
+  document.addEventListener("keydown", (e) => {
+    if (["INPUT", "TEXTAREA"].includes(document.activeElement.tagName)) return;
+    if (!activeVideoId) return;
+
+    if (e.code === "Space") { e.preventDefault(); togglePlay(); }
+    if (e.code === "ArrowRight") { e.preventDefault(); nextFrameBtn.click(); }
+    if (e.code === "ArrowLeft") { e.preventDefault(); prevFrameBtn.click(); }
+  });
+
+  /* ------------------------------------------------------------------ *
+   * Init
+   * ------------------------------------------------------------------ */
+
+  clearInfoPanel();
+  updateVolumeIcon();
+  fetchLibrary();
+})();

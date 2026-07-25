@@ -1,0 +1,17 @@
+venv/
+__pycache__/
+*.pyc
+static/uploads/videos/*
+static/uploads/thumbnails/*
+static/uploads/library.json
+!static/uploads/videos/.gitkeep
+!static/uploads/thumbnails/.gitkeep
+models/*.task
+server_out.log
+server_err.log
+server_pid.txt
+desktop_out*.log
+desktop_err*.log
+desktop_pid.txt
+docs/
+.git

@@ -273,10 +273,7 @@ def llm_answer(question, analysis, provider="anthropic", api_key=None, model=Non
 
     key = _resolve_key(provider, api_key)
     if not key:
-        raise CoachError(
-            f"AI Chat needs an API key for {PROVIDER_LABELS[provider]} — click \"AI Chat\" and enter your own key. "
-            "Quick Answers mode works without one."
-        )
+        raise CoachError(f"This needs an API key for {PROVIDER_LABELS[provider]} — add your own key to continue.")
 
     context = _analysis_context_text(analysis)
     resolved_model = model or DEFAULT_MODELS[provider]
@@ -290,3 +287,28 @@ def answer_question(question, analysis, mode, provider="anthropic", api_key=None
     if mode == "llm":
         return llm_answer(question, analysis, provider=provider, api_key=api_key, model=model)
     return rule_based_answer(question, analysis)
+
+
+# --------------------------------------------------------------------------
+# Full AI analysis — a standalone written coaching take on a throw, using
+# the same provider dispatch as Ask AI's "AI Chat" mode, just with a fixed
+# prompt instead of a typed-in question. Exists because the heuristic
+# elbow/wrist scores and labels (see pose_analysis.py) are a documented
+# approximation, not a certified rating — this asks the model to actually
+# weigh the underlying numbers itself rather than parrot those labels back.
+# --------------------------------------------------------------------------
+
+AI_ANALYSIS_PROMPT = (
+    "Give a full, standalone coaching write-up for this session — don't just restate the "
+    "numbers and their computed labels, interpret them with your own judgment. The elbow/"
+    "wrist scores and Excellent/Very Good/Good/Needs Work labels above are from a simple "
+    "heuristic formula, not a certified rating, so weigh the raw numbers (angle range, "
+    "wrist speed, release timing) yourself rather than treating those labels as ground "
+    "truth. For each throw, assess technique in plain coaching language and call out the "
+    "single biggest thing to improve. Then summarize consistency across all throws and "
+    "suggest one concrete drill or cue to work on next. Keep it concise and actionable."
+)
+
+
+def ai_analyze(analysis, provider="anthropic", api_key=None, model=None):
+    return llm_answer(AI_ANALYSIS_PROMPT, analysis, provider=provider, api_key=api_key, model=model)

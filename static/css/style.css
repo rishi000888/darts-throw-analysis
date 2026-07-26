@@ -380,9 +380,11 @@ button { font-family: inherit; cursor: pointer; }
   padding: 18px;
   position: sticky;
   top: 84px;
+  max-height: calc(100vh - 104px);
+  overflow-y: auto;
 }
 
-@media (max-width: 1180px) { .library { position: static; } }
+@media (max-width: 1180px) { .library { position: static; max-height: none; overflow-y: visible; } }
 
 .library__header {
   display: flex;
@@ -481,6 +483,21 @@ button { font-family: inherit; cursor: pointer; }
 .library__add-actions .btn { margin-top: 0; }
 
 /* ---- Player column ---- */
+/* Same sticky + independently-scrollable treatment as .library and
+   .side-col, so all three workspace columns behave consistently — the
+   player card (video, timeline, trim toolbar, transport, speed, arm
+   select, analyze button) can be taller than the viewport without
+   dragging the whole page down with it. */
+
+.player-col {
+  position: sticky;
+  top: 84px;
+  max-height: calc(100vh - 104px);
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+@media (max-width: 1180px) { .player-col { position: static; max-height: none; overflow-y: visible; padding-right: 0; } }
 
 .player-card {
   background: var(--surface);
@@ -727,8 +744,22 @@ button { font-family: inherit; cursor: pointer; }
 }
 
 /* ---- Side column ---- */
+/* Sticky + independently scrollable, same as .library, so a tall stack of
+   panels (Video Information, Throw Analysis, AI Analysis, Ask AI) scrolls
+   on its own without dragging the whole page down with it. */
 
-.side-col { display: flex; flex-direction: column; gap: 18px; }
+.side-col {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  position: sticky;
+  top: 84px;
+  max-height: calc(100vh - 104px);
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+@media (max-width: 1180px) { .side-col { position: static; max-height: none; overflow-y: visible; padding-right: 0; } }
 
 .panel {
   background: var(--surface);
@@ -840,6 +871,23 @@ button { font-family: inherit; cursor: pointer; }
 .pictograph__bar.score--very-good .pictograph__fill { background: var(--blue); }
 .pictograph__bar.score--good .pictograph__fill { background: var(--yellow); }
 .pictograph__bar.score--needs-work .pictograph__fill { background: var(--bullseye); }
+
+/* ---- AI Analysis (full written take, vs. the heuristic scores above) ---- */
+
+.panel--ai-analysis .api-key-link { margin-top: 10px; }
+
+.ai-analysis-result {
+  margin-top: 14px;
+  padding: 12px 14px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  font-size: 13.5px;
+  line-height: 1.6;
+  color: var(--text-dim);
+  white-space: pre-wrap;
+}
+.ai-analysis-result.is-error { color: var(--bullseye); border-color: var(--bullseye-dim); }
 
 /* ---- Ask AI coaching box ---- */
 

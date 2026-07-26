@@ -61,6 +61,13 @@ frame-accurate, slow-motion video player, plus AI pose-detection scoring.
   `localStorage` and sent with each question; the server never stores them.
   Without a key, that mode returns a clear error and Quick Answers still
   works.
+- **Analyze by AI**: a "Start Analysis" scores your throw against a fixed
+  heuristic formula — this instead sends those same measured numbers to an
+  LLM and asks it to write a full, standalone coaching take, since the
+  heuristic labels are an approximation, not a certified rating. Uses the
+  same bring-your-own-key/provider modal as Ask AI's "AI Chat" mode (they
+  share the saved key), and the result is cached per video and provider in
+  `library.json` so revisiting a throw doesn't re-spend an API call.
 - Fully responsive: 3-column layout on desktop, stacked on tablet/phone,
   touch-friendly controls
 - Dark, sports-themed UI (blue / green / white accents)

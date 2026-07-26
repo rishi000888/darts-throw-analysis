@@ -115,6 +115,10 @@
   const apiKeySaveBtn = document.getElementById("api-key-save");
   const apiKeyClearBtn = document.getElementById("api-key-clear");
 
+  const aiAnalysisKeyLink = document.getElementById("ai-analysis-key-link");
+  const aiAnalyzeBtn = document.getElementById("ai-analyze-btn");
+  const aiAnalysisResult = document.getElementById("ai-analysis-result");
+
   const infoFilename = document.getElementById("info-filename");
   const infoResolution = document.getElementById("info-resolution");
   const infoFps = document.getElementById("info-fps");
@@ -144,6 +148,9 @@
   let trimStart = null;        // seconds — marked in-point for the trim toolbar
   let trimEnd = null;          // seconds — marked out-point for the trim toolbar
   let trimBusy = false;
+  let pendingApiKeyCallback = null;   // run once a key is saved, when the modal was opened to unblock an action
+  let apiKeyModalFromCoachToggle = false; // whether Cancel should fall back the coach mode toggle to "rule"
+  let aiAnalysisBusy = false;
 
   let mediaStream = null;      // active getUserMedia stream, while the record modal is open
   let mediaRecorder = null;
@@ -454,6 +461,63 @@
     }
   });
 
+  /* ------------------------------------------------------------------ *
+   * Analyze by AI — a full written coaching take from an LLM, since the
+   * heuristic scores above are an approximate formula, not a certified
+   * rating. Reuses the same provider + API key storage as Ask AI's
+   * "AI Chat" mode (see openApiKeyModal above).
+   * ------------------------------------------------------------------ */
+
+  function showAiAnalysisResult(text) {
+    aiAnalysisResult.hidden = false;
+    aiAnalysisResult.textContent = text;
+    aiAnalysisResult.classList.remove("is-error");
+  }
+
+  function showAiAnalysisError(message) {
+    aiAnalysisResult.hidden = false;
+    aiAnalysisResult.textContent = message;
+    aiAnalysisResult.classList.add("is-error");
+  }
+
+  async function runAiAnalysis() {
+    const video = activeVideo();
+    if (!video || !video.analysis) { showToast("Analyze this throw first."); return; }
+
+    const provider = getStoredProvider();
+    const apiKey = getStoredApiKey(provider);
+    if (!apiKey) { openApiKeyModal(runAiAnalysis); return; }
+
+    aiAnalysisBusy = true;
+    aiAnalyzeBtn.disabled = true;
+    aiAnalysisResult.hidden = false;
+    aiAnalysisResult.classList.remove("is-error");
+    aiAnalysisResult.textContent = "Thinking…";
+
+    try {
+      const res = await fetch(`/api/ai-analyze/${video.id}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider, api_key: apiKey }),
+      });
+      const data = await res.json();
+
+      if (!res.ok) {
+        showAiAnalysisError(data.error || "Couldn't generate an AI analysis.");
+        if (/api key/i.test(data.error || "")) openApiKeyModal(runAiAnalysis);
+      } else {
+        showAiAnalysisResult(data.result);
+      }
+    } catch (err) {
+      showAiAnalysisError("Request failed — check your connection and try again.");
+    } finally {
+      aiAnalysisBusy = false;
+      aiAnalyzeBtn.disabled = false;
+    }
+  }
+
+  aiAnalyzeBtn.addEventListener("click", runAiAnalysis);
+
   async function deleteVideo(id) {
     const video = library.find((v) => v.id === id);
     if (!video) return;
@@ -555,6 +619,13 @@
     throwPictograph.innerHTML = "";
     selectedThrowIndex = 0;
     resetCoachLog();
+    resetAiAnalysis();
+  }
+
+  function resetAiAnalysis() {
+    aiAnalysisResult.hidden = true;
+    aiAnalysisResult.textContent = "";
+    aiAnalysisResult.classList.remove("is-error");
   }
 
   function renderThrowDetail(throw_) {
@@ -665,6 +736,11 @@
     } else {
       setSelectedArm("right");
       clearAnalysisPanel();
+    }
+
+    resetAiAnalysis();
+    if (video.ai_analysis && video.ai_analysis.text) {
+      showAiAnalysisResult(video.ai_analysis.text);
     }
 
     resetTrimMarks();
@@ -947,11 +1023,15 @@
   }
 
   function updateApiKeyLink() {
-    if (coachMode !== "llm") { apiKeyChangeBtn.hidden = true; return; }
-    apiKeyChangeBtn.hidden = false;
     const provider = getStoredProvider();
     const short = PROVIDERS[provider].short;
-    apiKeyChangeBtn.textContent = getStoredApiKey(provider) ? `Using your saved ${short} key · Change` : "Set your API key";
+    const label = getStoredApiKey(provider) ? `Using your saved ${short} key · Change` : "Set your API key";
+
+    if (coachMode !== "llm") { apiKeyChangeBtn.hidden = true; } else {
+      apiKeyChangeBtn.hidden = false;
+      apiKeyChangeBtn.textContent = label;
+    }
+    aiAnalysisKeyLink.textContent = label;
   }
 
   function setCoachModeUI(mode) {
@@ -972,7 +1052,12 @@
     apiKeyConsoleLink.textContent = PROVIDERS[provider].consoleUrl.replace(/^https?:\/\//, "").replace(/\/.*$/, "");
   }
 
-  function openApiKeyModal() {
+  /* `onReady`, if given, runs once a key has been saved for the selected
+   * provider — lets a caller (e.g. "Analyze by AI") kick the modal open,
+   * then resume the action it was trying to do rather than making the
+   * user click twice. */
+  function openApiKeyModal(onReady) {
+    pendingApiKeyCallback = onReady || null;
     apiKeyProviderSelect.value = getStoredProvider();
     syncApiKeyModalToProvider();
     apiKeyModal.hidden = false;
@@ -987,10 +1072,14 @@
     const btn = e.target.closest(".coach-mode__btn");
     if (!btn) return;
     setCoachModeUI(btn.dataset.mode);
-    if (btn.dataset.mode === "llm" && !getStoredApiKey(getStoredProvider())) openApiKeyModal();
+    if (btn.dataset.mode === "llm" && !getStoredApiKey(getStoredProvider())) {
+      apiKeyModalFromCoachToggle = true;
+      openApiKeyModal();
+    }
   });
 
-  apiKeyChangeBtn.addEventListener("click", openApiKeyModal);
+  apiKeyChangeBtn.addEventListener("click", () => openApiKeyModal());
+  aiAnalysisKeyLink.addEventListener("click", () => openApiKeyModal());
   apiKeyProviderSelect.addEventListener("change", syncApiKeyModalToProvider);
 
   apiKeySaveBtn.addEventListener("click", () => {
@@ -1002,6 +1091,11 @@
     closeApiKeyModal();
     updateApiKeyLink();
     showToast(`${PROVIDERS[provider].short} key saved in this browser.`);
+
+    apiKeyModalFromCoachToggle = false;
+    const callback = pendingApiKeyCallback;
+    pendingApiKeyCallback = null;
+    if (callback) callback();
   });
 
   apiKeyClearBtn.addEventListener("click", () => {
@@ -1014,7 +1108,9 @@
 
   apiKeyCancelBtn.addEventListener("click", () => {
     closeApiKeyModal();
-    if (!getStoredApiKey(getStoredProvider())) setCoachModeUI("rule");
+    if (apiKeyModalFromCoachToggle && !getStoredApiKey(getStoredProvider())) setCoachModeUI("rule");
+    apiKeyModalFromCoachToggle = false;
+    pendingApiKeyCallback = null;
   });
 
   apiKeyModal.addEventListener("click", (e) => { if (e.target === apiKeyModal) apiKeyCancelBtn.click(); });

@@ -12,12 +12,23 @@ Scoring is a documented heuristic, not a trained biomechanical model —
 there's no labeled dart-throw dataset to calibrate against, so these
 formulas are a reasonable first approximation:
 
-- Elbow stability: how little the elbow angle wobbles during that throw's
-  window. A rock-steady elbow has low angle variance; a "chicken wing"
-  throw swings the angle around a lot.
+- Elbow stability: how little the elbow angle *wobbles* around the throw's
+  own natural swing — not how little it moves overall. A proper throw
+  swings the elbow angle open by a lot (bent on the backswing, near-
+  straight at release), and that big, smooth extension is the throw
+  itself, not instability. This scores the leftover jitter after that
+  swing is subtracted out (see `_angle_wobble`): a clean extension stays
+  close to a smooth line even though its raw range is wide, while a real
+  "chicken wing" throw departs from it with erratic angle changes.
 - Elbow direction: net elbow drift (up/down, left/right, as seen on
   screen) from the start of the throw window to the release frame —
   flags things like the elbow dropping or drifting sideways mid-throw.
+- Angle noise filtering: MediaPipe occasionally mistracks a single frame
+  (motion blur at release, a hand briefly occluding the elbow) — a
+  median filter (see `_median_filter_by_frame`) absorbs one-off glitches,
+  and readings below `MIN_PLAUSIBLE_ELBOW_ANGLE` are dropped outright as
+  mistracked rather than scored, since a real elbow doesn't fold that
+  tight mid-throw even when MediaPipe reports the landmark confidently.
 - Wrist snap: how sharply the wrist accelerates for that throw relative
   to the video's overall average wrist speed. A real snap is a sudden
   spike, not a steady speed.
@@ -61,8 +72,12 @@ ARM_LANDMARKS = {
 }
 
 VISIBILITY_THRESHOLD = 0.5
-ELBOW_STABILITY_SCALE = 3.0     # degrees of stdev -> percentage points lost
+ELBOW_STABILITY_SCALE = 3.0     # degrees of wobble (post-detrend) -> percentage points lost
 MIN_VALID_FRAMES = 5            # below this, we don't trust the result
+MIN_PLAUSIBLE_ELBOW_ANGLE = 20  # degrees — a real elbow doesn't fold tighter than this mid-throw;
+                                 # anything lower is a mistracked frame even if MediaPipe reported it
+                                 # confidently (most often the arm briefly lining up with the camera's
+                                 # line of sight at release, which 2D landmark math can't represent)
 
 PEAK_HEIGHT_RATIO = 0.35        # a throw's peak speed must clear this fraction of the video's fastest peak
 MIN_THROW_GAP_SEC = 1.0         # throws must be at least this far apart
@@ -100,6 +115,27 @@ def _score_band(score):
 
 def _clamp(value, low=0.0, high=100.0):
     return max(low, min(high, value))
+
+
+def _median_filter_by_frame(values_by_frame, window=3):
+    """Median-filter a {frame_index: value} stream, in frame order.
+
+    MediaPipe occasionally mis-tracks a single frame — a hand briefly
+    occluding the elbow, motion blur right at release — and produces one
+    wildly wrong angle in the middle of otherwise-good frames (e.g. a
+    momentary drop to a near-zero angle no real elbow could reach in
+    1/30th of a second). A median is robust to exactly that: an isolated
+    outlier gets replaced by its neighbors, while a real, gradual swing
+    passes through unchanged. A moving *average* would instead smear the
+    bad frame's influence across its neighbors too."""
+    frames = sorted(values_by_frame)
+    values = [values_by_frame[f] for f in frames]
+    half = window // 2
+    filtered = []
+    for i in range(len(values)):
+        lo, hi = max(0, i - half), min(len(values), i + half + 1)
+        filtered.append(statistics.median(values[lo:hi]))
+    return dict(zip(frames, filtered))
 
 
 def _extract_landmark_stream(video_path, arm):
@@ -158,7 +194,7 @@ def _extract_landmark_stream(video_path, arm):
                     wrist_px = (wrist.x * width, wrist.y * height)
 
                     angle = _angle_at(shoulder_px, elbow_px, wrist_px)
-                    if angle is not None:
+                    if angle is not None and angle >= MIN_PLAUSIBLE_ELBOW_ANGLE:
                         elbow_angles[frame_index] = angle
                     wrist_pos[frame_index] = wrist_px
                     elbow_pos[frame_index] = elbow_px
@@ -166,6 +202,7 @@ def _extract_landmark_stream(video_path, arm):
             frame_index += 1
 
     cap.release()
+    elbow_angles = _median_filter_by_frame(elbow_angles, window=3)
     return fps, width, height, elbow_angles, wrist_pos, elbow_pos, frame_index
 
 
@@ -259,16 +296,50 @@ def _direction_label(dx, dy, diagonal):
     }
 
 
+def _angle_wobble(window_angles_by_frame):
+    """How erratically the elbow angle moves, with the throw's own smooth
+    cocked-to-extended swing subtracted out first.
+
+    A proper throw swings the elbow angle open by 60-80+ degrees over the
+    window (bent on the backswing, near-straight at release) — that's the
+    throw itself, not instability, and raw stdev of the angle can't tell
+    the two apart: it penalizes a big, clean extension exactly as much as
+    real "chicken wing" flailing, since both produce a wide angle range.
+    Fitting a straight line through the window's angle-vs-time and scoring
+    the leftover residual isolates the wobble around that swing instead of
+    the swing's size — a smooth extension fits the line closely (small
+    residual) even though its raw range is large, while an erratic throw
+    departs from it (large residual) regardless of range."""
+    frames = sorted(window_angles_by_frame)
+    ys = [window_angles_by_frame[f] for f in frames]
+    n = len(ys)
+    if n < 3:
+        return 0.0
+
+    xs = list(range(n))
+    mean_x = statistics.mean(xs)
+    mean_y = statistics.mean(ys)
+    var_x = sum((x - mean_x) ** 2 for x in xs)
+    if var_x == 0:
+        return statistics.pstdev(ys)
+
+    slope = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys)) / var_x
+    intercept = mean_y - slope * mean_x
+    residuals = [y - (slope * x + intercept) for x, y in zip(xs, ys)]
+    return statistics.pstdev(residuals)
+
+
 def _score_throw(window_start, window_end, release_frame, fps, diagonal,
                   elbow_angles, wrist_pos, elbow_pos, overall_mean_speed):
-    window_angles = [a for f, a in elbow_angles.items() if window_start <= f <= window_end]
+    window_angle_frames = {f: a for f, a in elbow_angles.items() if window_start <= f <= window_end}
+    window_angles = list(window_angle_frames.values())
     window_wrist = {f: p for f, p in wrist_pos.items() if window_start <= f <= window_end}
 
     if len(window_angles) < 3 or len(window_wrist) < 3:
         return None
 
-    angle_stdev = statistics.pstdev(window_angles) if len(window_angles) > 1 else 0.0
-    elbow_stability_score = round(_clamp(100 - angle_stdev * ELBOW_STABILITY_SCALE))
+    angle_wobble = _angle_wobble(window_angle_frames)
+    elbow_stability_score = round(_clamp(100 - angle_wobble * ELBOW_STABILITY_SCALE))
 
     window_speeds = _wrist_speed_series(window_wrist, fps, diagonal)
     peak_speed = max((s for _, s in window_speeds), default=0.0)

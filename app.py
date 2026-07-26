@@ -303,12 +303,16 @@ def coach(video_id):
     data = request.get_json(silent=True) or {}
     question = data.get("question", "")
     mode = data.get("mode", "rule")
+    provider = data.get("provider", "anthropic")
     api_key = (data.get("api_key") or "").strip() or None
+    model = (data.get("model") or "").strip() or None
     if mode not in ("rule", "llm"):
         return jsonify({"error": "mode must be 'rule' or 'llm'."}), 400
+    if mode == "llm" and provider not in ai_coach.PROVIDERS:
+        return jsonify({"error": f"Unknown AI provider '{provider}'."}), 400
 
     try:
-        answer = ai_coach.answer_question(question, analysis, mode, api_key=api_key)
+        answer = ai_coach.answer_question(question, analysis, mode, provider=provider, api_key=api_key, model=model)
     except ai_coach.CoachError as err:
         return jsonify({"error": str(err)}), 400
 

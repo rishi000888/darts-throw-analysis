@@ -6,15 +6,17 @@ Two ways to answer a question about a throw's analysis:
 - Rule-based ("quick answers"): a small keyword router that explains the
   already-computed numbers in plain language. Free, instant, no API key,
   but can't answer anything outside its keyword list.
-- LLM ("AI chat"): a real call to the Claude API, given the computed
-  analysis as context. Free-form, but needs an Anthropic API key and costs
-  a small amount per question. Each caller brings their own key (typed
-  into the frontend, passed as `api_key`) rather than sharing the server's
-  — `ANTHROPIC_API_KEY` in the environment is only a fallback for local
-  dev, not something a multi-user deployment should rely on.
+- LLM ("AI chat"): a real call to one of several providers (Anthropic,
+  OpenAI, or Google), given the computed analysis as context. Free-form,
+  but needs an API key and costs a small amount per question. Each caller
+  brings their own key and picks their own provider (typed into the
+  frontend, passed as `api_key` / `provider`) rather than sharing the
+  server's — different visitors of a shared deployment already have keys
+  for different providers, so the server has no single "right" key to
+  fall back on other than local-dev env vars.
 
-Which mode is used is a per-request choice made by the caller (the
-frontend toggle) — this module doesn't decide that itself.
+Which mode/provider is used is a per-request choice made by the caller
+(the frontend toggle) — this module doesn't decide that itself.
 """
 
 import os
@@ -25,7 +27,30 @@ try:
 except ImportError:
     ANTHROPIC_SDK_AVAILABLE = False
 
-DEFAULT_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-opus-4-8")
+try:
+    import openai
+    OPENAI_SDK_AVAILABLE = True
+except ImportError:
+    OPENAI_SDK_AVAILABLE = False
+
+try:
+    from google import genai
+    from google.genai import errors as genai_errors
+    GEMINI_SDK_AVAILABLE = True
+except ImportError:
+    GEMINI_SDK_AVAILABLE = False
+
+DEFAULT_MODELS = {
+    "anthropic": os.environ.get("ANTHROPIC_MODEL", "claude-opus-4-8"),
+    "openai": os.environ.get("OPENAI_MODEL", "gpt-5.1"),
+    "gemini": os.environ.get("GEMINI_MODEL", "gemini-3-pro"),
+}
+
+PROVIDER_ENV_KEYS = {
+    "anthropic": ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"),
+    "openai": ("OPENAI_API_KEY",),
+    "gemini": ("GEMINI_API_KEY", "GOOGLE_API_KEY"),
+}
 
 
 class CoachError(Exception):
@@ -148,28 +173,24 @@ SYSTEM_PROMPT = (
 )
 
 
-def llm_answer(question, analysis, api_key=None):
+def _resolve_key(provider, api_key):
+    if api_key:
+        return api_key
+    for env_var in PROVIDER_ENV_KEYS[provider]:
+        value = os.environ.get(env_var)
+        if value:
+            return value
+    return None
+
+
+def _anthropic_answer(question, context, key, model):
     if not ANTHROPIC_SDK_AVAILABLE:
         raise CoachError("The anthropic package isn't installed on the server.")
 
-    # Bring-your-own-key: a key supplied by the caller (typed into the
-    # frontend, stored in that browser's localStorage) always wins over
-    # anything set on the server — this app is meant to be used by other
-    # people, each paying for their own Claude usage, not sharing the
-    # developer's key. ANTHROPIC_API_KEY is only a fallback for local dev.
-    key = api_key or os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")
-    if not key:
-        raise CoachError(
-            "AI Chat needs an Anthropic API key — click \"AI Chat\" and enter your own key. "
-            "Quick Answers mode works without one."
-        )
-
     client = anthropic.Anthropic(api_key=key)
-    context = _analysis_context_text(analysis)
-
     try:
         response = client.messages.create(
-            model=DEFAULT_MODEL,
+            model=model,
             max_tokens=1024,
             system=SYSTEM_PROMPT,
             messages=[{
@@ -191,10 +212,81 @@ def llm_answer(question, analysis, api_key=None):
     return text or "(no response text)"
 
 
-def answer_question(question, analysis, mode, api_key=None):
+def _openai_answer(question, context, key, model):
+    if not OPENAI_SDK_AVAILABLE:
+        raise CoachError("The openai package isn't installed on the server.")
+
+    client = openai.OpenAI(api_key=key)
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            max_tokens=1024,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": f"Throw analysis:\n{context}\n\nQuestion: {question}"},
+            ],
+        )
+    except openai.AuthenticationError as err:
+        raise CoachError("That API key was rejected by OpenAI — double-check it and try again.") from err
+    except openai.APIConnectionError as err:
+        raise CoachError("Couldn't reach the OpenAI API — check your network connection.") from err
+    except openai.APIStatusError as err:
+        raise CoachError(f"AI Chat request failed: {err.message}") from err
+
+    text = response.choices[0].message.content
+    return text or "(no response text)"
+
+
+def _gemini_answer(question, context, key, model):
+    if not GEMINI_SDK_AVAILABLE:
+        raise CoachError("The google-genai package isn't installed on the server.")
+
+    client = genai.Client(api_key=key)
+    try:
+        response = client.models.generate_content(
+            model=model,
+            contents=f"Throw analysis:\n{context}\n\nQuestion: {question}",
+            config={"system_instruction": SYSTEM_PROMPT, "max_output_tokens": 1024},
+        )
+    except genai_errors.ClientError as err:
+        if getattr(err, "code", None) in (401, 403):
+            raise CoachError("That API key was rejected by Google — double-check it and try again.") from err
+        raise CoachError(f"AI Chat request failed: {err}") from err
+    except genai_errors.APIError as err:
+        raise CoachError(f"AI Chat request failed: {err}") from err
+
+    return response.text or "(no response text)"
+
+
+PROVIDERS = {
+    "anthropic": _anthropic_answer,
+    "openai": _openai_answer,
+    "gemini": _gemini_answer,
+}
+
+PROVIDER_LABELS = {"anthropic": "Anthropic", "openai": "OpenAI", "gemini": "Google"}
+
+
+def llm_answer(question, analysis, provider="anthropic", api_key=None, model=None):
+    if provider not in PROVIDERS:
+        raise CoachError(f"Unknown AI provider '{provider}'.")
+
+    key = _resolve_key(provider, api_key)
+    if not key:
+        raise CoachError(
+            f"AI Chat needs an API key for {PROVIDER_LABELS[provider]} — click \"AI Chat\" and enter your own key. "
+            "Quick Answers mode works without one."
+        )
+
+    context = _analysis_context_text(analysis)
+    resolved_model = model or DEFAULT_MODELS[provider]
+    return PROVIDERS[provider](question, context, key, resolved_model)
+
+
+def answer_question(question, analysis, mode, provider="anthropic", api_key=None, model=None):
     question = (question or "").strip()
     if not question:
         raise CoachError("Ask a question first.")
     if mode == "llm":
-        return llm_answer(question, analysis, api_key=api_key)
+        return llm_answer(question, analysis, provider=provider, api_key=api_key, model=model)
     return rule_based_answer(question, analysis)

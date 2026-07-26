@@ -940,6 +940,13 @@ button { font-family: inherit; cursor: pointer; }
 }
 .api-key-hint a { color: var(--blue); }
 
+.field-label {
+  display: block;
+  font-size: 12px;
+  color: var(--text-faint);
+  margin: 0 0 6px;
+}
+
 .text-input {
   width: 100%;
   padding: 11px 14px;
@@ -949,8 +956,11 @@ button { font-family: inherit; cursor: pointer; }
   color: var(--text);
   font-family: var(--font-body);
   font-size: 14px;
+  margin-bottom: 14px;
 }
 .text-input:focus { outline: none; border-color: var(--blue); }
+.coach-form .text-input { margin-bottom: 0; }
+select.text-input { appearance: auto; cursor: pointer; }
 
 .modal__actions {
   display: flex;

@@ -93,6 +93,8 @@
 
   const apiKeyChangeBtn = document.getElementById("api-key-change-btn");
   const apiKeyModal = document.getElementById("api-key-modal");
+  const apiKeyProviderSelect = document.getElementById("api-key-provider");
+  const apiKeyConsoleLink = document.getElementById("api-key-console-link");
   const apiKeyInput = document.getElementById("api-key-input");
   const apiKeyCancelBtn = document.getElementById("api-key-cancel");
   const apiKeySaveBtn = document.getElementById("api-key-save");
@@ -738,24 +740,42 @@
     coachLog.scrollTop = coachLog.scrollHeight;
   }
 
-  /* ---- Anthropic API key (AI Chat mode — bring your own key) ----
-   * This app is used by other people, not just its developer, so AI Chat
-   * calls Claude with a key each visitor supplies themselves rather than
-   * one shared server-side key. The key lives only in this browser's
-   * localStorage and rides along with each /api/coach request; the server
-   * never stores it (see ai_coach.py — it's used for one API call and
-   * discarded). */
+  /* ---- AI provider + API key (AI Chat mode — bring your own key) ----
+   * This app is used by other people, not just its developer, and different
+   * visitors already have keys for different providers — so AI Chat lets
+   * each person pick Claude, GPT, or Gemini and supply their own key rather
+   * than sharing one server-side key for one provider. The provider choice
+   * and each provider's key live only in this browser's localStorage and
+   * ride along with each /api/coach request; the server never stores them
+   * (see ai_coach.py — used for one API call and discarded). */
 
-  const API_KEY_STORAGE_KEY = "darts_anthropic_api_key";
+  const PROVIDERS = {
+    anthropic: { label: "Anthropic (Claude)", short: "Claude", keyPlaceholder: "sk-ant-...", consoleUrl: "https://console.anthropic.com/settings/keys" },
+    openai: { label: "OpenAI (GPT)", short: "GPT", keyPlaceholder: "sk-...", consoleUrl: "https://platform.openai.com/api-keys" },
+    gemini: { label: "Google (Gemini)", short: "Gemini", keyPlaceholder: "AIza...", consoleUrl: "https://aistudio.google.com/apikey" },
+  };
+  const PROVIDER_STORAGE_KEY = "darts_ai_provider";
+  const keyStorageKey = (provider) => `darts_api_key_${provider}`;
 
-  function getStoredApiKey() {
-    try { return localStorage.getItem(API_KEY_STORAGE_KEY) || ""; } catch (err) { return ""; }
+  function getStoredProvider() {
+    try {
+      const p = localStorage.getItem(PROVIDER_STORAGE_KEY);
+      return PROVIDERS[p] ? p : "anthropic";
+    } catch (err) { return "anthropic"; }
   }
 
-  function setStoredApiKey(key) {
+  function setStoredProvider(provider) {
+    try { localStorage.setItem(PROVIDER_STORAGE_KEY, provider); } catch (err) { /* ignore */ }
+  }
+
+  function getStoredApiKey(provider) {
+    try { return localStorage.getItem(keyStorageKey(provider)) || ""; } catch (err) { return ""; }
+  }
+
+  function setStoredApiKey(provider, key) {
     try {
-      if (key) localStorage.setItem(API_KEY_STORAGE_KEY, key);
-      else localStorage.removeItem(API_KEY_STORAGE_KEY);
+      if (key) localStorage.setItem(keyStorageKey(provider), key);
+      else localStorage.removeItem(keyStorageKey(provider));
     } catch (err) {
       // Storage unavailable (private browsing, etc.) — key just won't persist across reloads.
     }
@@ -764,7 +784,9 @@
   function updateApiKeyLink() {
     if (coachMode !== "llm") { apiKeyChangeBtn.hidden = true; return; }
     apiKeyChangeBtn.hidden = false;
-    apiKeyChangeBtn.textContent = getStoredApiKey() ? "Using your saved API key · Change" : "Set your API key";
+    const provider = getStoredProvider();
+    const short = PROVIDERS[provider].short;
+    apiKeyChangeBtn.textContent = getStoredApiKey(provider) ? `Using your saved ${short} key · Change` : "Set your API key";
   }
 
   function setCoachModeUI(mode) {
@@ -777,8 +799,17 @@
     updateApiKeyLink();
   }
 
+  function syncApiKeyModalToProvider() {
+    const provider = apiKeyProviderSelect.value;
+    apiKeyInput.value = getStoredApiKey(provider);
+    apiKeyInput.placeholder = PROVIDERS[provider].keyPlaceholder;
+    apiKeyConsoleLink.href = PROVIDERS[provider].consoleUrl;
+    apiKeyConsoleLink.textContent = PROVIDERS[provider].consoleUrl.replace(/^https?:\/\//, "").replace(/\/.*$/, "");
+  }
+
   function openApiKeyModal() {
-    apiKeyInput.value = getStoredApiKey();
+    apiKeyProviderSelect.value = getStoredProvider();
+    syncApiKeyModalToProvider();
     apiKeyModal.hidden = false;
     apiKeyInput.focus();
   }
@@ -791,30 +822,34 @@
     const btn = e.target.closest(".coach-mode__btn");
     if (!btn) return;
     setCoachModeUI(btn.dataset.mode);
-    if (btn.dataset.mode === "llm" && !getStoredApiKey()) openApiKeyModal();
+    if (btn.dataset.mode === "llm" && !getStoredApiKey(getStoredProvider())) openApiKeyModal();
   });
 
   apiKeyChangeBtn.addEventListener("click", openApiKeyModal);
+  apiKeyProviderSelect.addEventListener("change", syncApiKeyModalToProvider);
 
   apiKeySaveBtn.addEventListener("click", () => {
+    const provider = apiKeyProviderSelect.value;
     const key = apiKeyInput.value.trim();
     if (!key) { showToast("Enter a valid API key."); return; }
-    setStoredApiKey(key);
+    setStoredProvider(provider);
+    setStoredApiKey(provider, key);
     closeApiKeyModal();
     updateApiKeyLink();
-    showToast("API key saved in this browser.");
+    showToast(`${PROVIDERS[provider].short} key saved in this browser.`);
   });
 
   apiKeyClearBtn.addEventListener("click", () => {
-    setStoredApiKey("");
+    const provider = apiKeyProviderSelect.value;
+    setStoredApiKey(provider, "");
     apiKeyInput.value = "";
     updateApiKeyLink();
-    showToast("Saved API key cleared.");
+    showToast(`Saved ${PROVIDERS[provider].short} key cleared.`);
   });
 
   apiKeyCancelBtn.addEventListener("click", () => {
     closeApiKeyModal();
-    if (!getStoredApiKey()) setCoachModeUI("rule");
+    if (!getStoredApiKey(getStoredProvider())) setCoachModeUI("rule");
   });
 
   apiKeyModal.addEventListener("click", (e) => { if (e.target === apiKeyModal) apiKeyCancelBtn.click(); });
@@ -837,7 +872,11 @@
 
     try {
       const payload = { question, mode: coachMode };
-      if (coachMode === "llm") payload.api_key = getStoredApiKey();
+      if (coachMode === "llm") {
+        const provider = getStoredProvider();
+        payload.provider = provider;
+        payload.api_key = getStoredApiKey(provider);
+      }
 
       const res = await fetch(`/api/coach/${video.id}`, {
         method: "POST",

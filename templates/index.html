@@ -247,17 +247,26 @@
   </div>
 </div>
 
-<!-- Anthropic API key modal (AI Chat mode — bring your own key) -->
+<!-- AI provider + API key modal (AI Chat mode — bring your own key) -->
 <div class="modal" id="api-key-modal" hidden>
   <div class="modal__card">
-    <h3>Your Anthropic API Key</h3>
+    <h3>Your AI Chat Settings</h3>
     <p class="api-key-hint">
-      AI Chat calls the Claude API directly using your own key. It's stored only in
-      this browser (never sent anywhere but this server, never saved server-side) and
-      you're billed directly by Anthropic for what you use. Get a key at
-      <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener noreferrer">console.anthropic.com</a>.
+      AI Chat calls your chosen provider directly using your own key. Nothing is
+      stored server-side — the key lives only in this browser and rides along with
+      each question — and you're billed directly by that provider for what you use.
     </p>
+    <label class="field-label" for="api-key-provider">Provider</label>
+    <select id="api-key-provider" class="text-input">
+      <option value="anthropic">Anthropic (Claude)</option>
+      <option value="openai">OpenAI (GPT)</option>
+      <option value="gemini">Google (Gemini)</option>
+    </select>
+    <label class="field-label" for="api-key-input">API Key</label>
     <input type="password" id="api-key-input" class="text-input" placeholder="sk-ant-..." autocomplete="off" spellcheck="false">
+    <p class="api-key-hint">
+      Get a key: <a id="api-key-console-link" href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener noreferrer">console.anthropic.com</a>
+    </p>
     <div class="modal__actions">
       <button class="btn btn--outline" id="api-key-clear">Clear Saved Key</button>
       <button class="btn btn--outline" id="api-key-cancel">Cancel</button>

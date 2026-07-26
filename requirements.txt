@@ -8,9 +8,12 @@ Werkzeug==3.0.3
 mediapipe==0.10.35
 
 # Ask AI coaching box — optional "AI Chat" mode (Quick Answers mode needs
-# nothing beyond this package being importable; the API key is separate,
-# see README).
+# no packages at all; each visitor brings their own API key for whichever
+# provider they pick, see README). Any one of these three can be missing
+# without breaking the others — ai_coach.py checks availability per provider.
 anthropic
+openai
+google-genai
 
 # Desktop app (desktop.py) — wraps app.py in a native window instead of a
 # browser tab. Not needed if you only ever run `python app.py`.

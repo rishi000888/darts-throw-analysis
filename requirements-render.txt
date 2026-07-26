@@ -7,4 +7,6 @@ Flask==3.0.3
 Werkzeug==3.0.3
 mediapipe==0.10.35
 anthropic
+openai
+google-genai
 gunicorn==22.0.0

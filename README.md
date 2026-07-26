@@ -36,10 +36,16 @@ frame-accurate, slow-motion video player, plus AI pose-detection scoring.
   motion can be over-counted as extra throws.
 - **Ask AI** (`ai_coach.py`): a coaching Q&A box with two modes — **Quick
   Answers** (free, instant, keyword-matched explanations of the computed
-  numbers) and **AI Chat** (a real Claude API call with the analysis as
-  context, for open-ended questions). AI Chat needs `ANTHROPIC_API_KEY` set
-  in the environment; without it, that mode returns a clear error and Quick
-  Answers still works.
+  numbers) and **AI Chat** (a real LLM call with the analysis as context,
+  for open-ended questions). AI Chat is bring-your-own-key and
+  bring-your-own-provider: switching it on opens a modal to pick
+  **Anthropic (Claude)**, **OpenAI (GPT)**, or **Google (Gemini)** and paste
+  in a key for that provider — this is a shared web app, so each visitor
+  pays for their own usage rather than sharing the developer's key. The
+  provider choice and key are saved per-provider in that browser's
+  `localStorage` and sent with each question; the server never stores them.
+  Without a key, that mode returns a clear error and Quick Answers still
+  works.
 - Fully responsive: 3-column layout on desktop, stacked on tablet/phone,
   touch-friendly controls
 - Dark, sports-themed UI (blue / green / white accents)
@@ -85,12 +91,21 @@ curl -L -o models/pose_landmarker_lite.task \
 
 (On Windows PowerShell: `Invoke-WebRequest -Uri <url above> -OutFile models\pose_landmarker_lite.task`.)
 
-For the **AI Chat** mode of the Ask AI box, set an API key (optional — Quick
-Answers mode works without it):
+The **AI Chat** mode of the Ask AI box needs no server-side setup — each
+visitor pastes their own API key into the in-app modal (Quick Answers mode
+needs nothing at all). For local dev only, you can set a fallback key per
+provider as an environment variable, used when a request doesn't supply its
+own key:
 
 ```powershell
-$env:ANTHROPIC_API_KEY = "sk-ant-..."
+$env:ANTHROPIC_API_KEY = "sk-ant-..."   # Claude
+$env:OPENAI_API_KEY = "sk-..."          # GPT
+$env:GEMINI_API_KEY = "AIza..."         # Gemini
 ```
+
+Each provider's default model can also be overridden with an env var
+(`ANTHROPIC_MODEL`, `OPENAI_MODEL`, `GEMINI_MODEL`) if the built-in default
+becomes outdated.
 
 ## Run — web app
 

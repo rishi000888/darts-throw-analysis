@@ -15,6 +15,16 @@ anthropic
 openai
 google-genai
 
+# "Add from YouTube" — downloads a clip straight into the library instead
+# of requiring a local file. No system ffmpeg needed: youtube_fetch.py
+# restricts to pre-muxed formats so yt-dlp never has to merge streams.
+yt-dlp
+
+# Trim a video down to a shorter clip (video_trim.py) — bundles its own
+# static ffmpeg binary, so this is the one place that needs real encoding
+# (cutting to an exact, re-encoded H.264/AAC MP4) without a system install.
+imageio-ffmpeg
+
 # Desktop app (desktop.py) — wraps app.py in a native window instead of a
 # browser tab. Not needed if you only ever run `python app.py`.
 pywebview

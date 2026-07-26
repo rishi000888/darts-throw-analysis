@@ -41,6 +41,21 @@
   const recordRetakeBtn = document.getElementById("record-retake");
   const recordUseBtn = document.getElementById("record-use");
 
+  const youtubeBtn = document.getElementById("youtube-btn");
+  const youtubeMoreBtn = document.getElementById("youtube-more-btn");
+  const youtubeModal = document.getElementById("youtube-modal");
+  const youtubeInput = document.getElementById("youtube-input");
+  const youtubeStatus = document.getElementById("youtube-status");
+  const youtubeCancelBtn = document.getElementById("youtube-cancel");
+  const youtubeConfirmBtn = document.getElementById("youtube-confirm");
+
+  const trimMarkStartBtn = document.getElementById("trim-mark-start");
+  const trimStartReadout = document.getElementById("trim-start-readout");
+  const trimMarkEndBtn = document.getElementById("trim-mark-end");
+  const trimEndReadout = document.getElementById("trim-end-readout");
+  const trimCreateBtn = document.getElementById("trim-create-btn");
+  const trimStatusEl = document.getElementById("trim-status");
+
   const hero = document.getElementById("hero");
   const workspace = document.getElementById("workspace");
 
@@ -126,6 +141,9 @@
   let coachMode = "rule";      // "rule" | "llm"
   let coachBusy = false;
   let selectedArm = "right";   // "right" | "left" — which arm to analyze
+  let trimStart = null;        // seconds — marked in-point for the trim toolbar
+  let trimEnd = null;          // seconds — marked out-point for the trim toolbar
+  let trimBusy = false;
 
   let mediaStream = null;      // active getUserMedia stream, while the record modal is open
   let mediaRecorder = null;
@@ -289,6 +307,152 @@
       fileInput.value = "";
     }
   }
+
+  /* ------------------------------------------------------------------ *
+   * Add from YouTube
+   * ------------------------------------------------------------------ */
+
+  function setYoutubeStatus(message, kind) {
+    youtubeStatus.textContent = message || "";
+    youtubeStatus.classList.remove("is-error", "is-success");
+    if (kind) youtubeStatus.classList.add(kind === "error" ? "is-error" : "is-success");
+  }
+
+  function openYoutubeModal() {
+    if (library.length >= MAX_VIDEOS) {
+      showToast(`You already have the maximum of ${MAX_VIDEOS} throws. Delete one to add another.`);
+      return;
+    }
+    youtubeInput.value = "";
+    setYoutubeStatus("", null);
+    youtubeModal.hidden = false;
+    youtubeInput.focus();
+  }
+
+  function closeYoutubeModal() {
+    youtubeModal.hidden = true;
+  }
+
+  async function addFromYoutube() {
+    const url = youtubeInput.value.trim();
+    if (!url) { setYoutubeStatus("Paste a YouTube URL first.", "error"); return; }
+
+    youtubeConfirmBtn.disabled = true;
+    youtubeInput.disabled = true;
+    setYoutubeStatus("Downloading — this can take a little while for longer clips…", null);
+
+    try {
+      const res = await fetch("/api/youtube", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url }),
+      });
+      const data = await res.json();
+
+      if (!res.ok || !data.created || data.created.length === 0) {
+        setYoutubeStatus(data.error || "Couldn't add that video.", "error");
+        return;
+      }
+
+      closeYoutubeModal();
+      showToast("Video added from YouTube.");
+      await fetchLibrary();
+      workspace.hidden = false;
+      loadVideo(data.created[0].id);
+      workspace.scrollIntoView({ behavior: "smooth", block: "start" });
+    } catch (err) {
+      setYoutubeStatus("Request failed — check your connection and try again.", "error");
+    } finally {
+      youtubeConfirmBtn.disabled = false;
+      youtubeInput.disabled = false;
+    }
+  }
+
+  youtubeBtn.addEventListener("click", (e) => { e.stopPropagation(); openYoutubeModal(); });
+  youtubeMoreBtn.addEventListener("click", openYoutubeModal);
+  youtubeCancelBtn.addEventListener("click", closeYoutubeModal);
+  youtubeConfirmBtn.addEventListener("click", addFromYoutube);
+  youtubeModal.addEventListener("click", (e) => { if (e.target === youtubeModal) closeYoutubeModal(); });
+  youtubeInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); addFromYoutube(); }
+    if (e.key === "Escape") closeYoutubeModal();
+  });
+
+  /* ------------------------------------------------------------------ *
+   * Trim toolbar — cut a shorter clip out of a longer video using the
+   * player's own playhead to mark the range (e.g. isolating one player's
+   * throws out of a recording shared between two people)
+   * ------------------------------------------------------------------ */
+
+  function setTrimStatus(message, kind) {
+    trimStatusEl.textContent = message || "";
+    trimStatusEl.classList.remove("is-error", "is-success");
+    if (kind) trimStatusEl.classList.add(kind === "error" ? "is-error" : "is-success");
+  }
+
+  function updateTrimUI() {
+    trimStartReadout.textContent = trimStart != null ? formatTime(trimStart) : "--:--.--";
+    trimEndReadout.textContent = trimEnd != null ? formatTime(trimEnd) : "--:--.--";
+    trimCreateBtn.disabled = trimBusy || !(trimStart != null && trimEnd != null && trimEnd > trimStart);
+  }
+
+  function resetTrimMarks() {
+    trimStart = null;
+    trimEnd = null;
+    setTrimStatus("", null);
+    updateTrimUI();
+  }
+
+  trimMarkStartBtn.addEventListener("click", () => {
+    if (!activeVideo()) { showToast("Load a throw first."); return; }
+    trimStart = videoEl.currentTime;
+    setTrimStatus("", null);
+    updateTrimUI();
+  });
+
+  trimMarkEndBtn.addEventListener("click", () => {
+    if (!activeVideo()) { showToast("Load a throw first."); return; }
+    trimEnd = videoEl.currentTime;
+    setTrimStatus("", null);
+    updateTrimUI();
+  });
+
+  trimCreateBtn.addEventListener("click", async () => {
+    const video = activeVideo();
+    if (!video || trimStart == null || trimEnd == null || trimEnd <= trimStart) return;
+
+    if (library.length >= MAX_VIDEOS) {
+      setTrimStatus(`You already have the maximum of ${MAX_VIDEOS} throws. Delete one to add another.`, "error");
+      return;
+    }
+
+    trimBusy = true;
+    updateTrimUI();
+    setTrimStatus("Trimming — this takes a few seconds…", null);
+
+    try {
+      const res = await fetch(`/api/videos/${video.id}/trim`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ start: trimStart, end: trimEnd }),
+      });
+      const data = await res.json();
+
+      if (!res.ok || !data.created || data.created.length === 0) {
+        setTrimStatus(data.error || "Couldn't trim that video.", "error");
+        return;
+      }
+
+      showToast("Trimmed clip added to your library.");
+      await fetchLibrary();
+      loadVideo(data.created[0].id);
+    } catch (err) {
+      setTrimStatus("Request failed — check your connection and try again.", "error");
+    } finally {
+      trimBusy = false;
+      updateTrimUI();
+    }
+  });
 
   async function deleteVideo(id) {
     const video = library.find((v) => v.id === id);
@@ -503,6 +667,7 @@
       clearAnalysisPanel();
     }
 
+    resetTrimMarks();
     renderLibrary();
   }
 
@@ -903,7 +1068,7 @@
    * ------------------------------------------------------------------ */
 
   dropzone.addEventListener("click", (e) => {
-    if (e.target.closest("#upload-btn") || e.target.closest("#record-btn")) return; // buttons have their own handlers
+    if (e.target.closest("#upload-btn") || e.target.closest("#record-btn") || e.target.closest("#youtube-btn")) return; // buttons have their own handlers
     fileInput.click();
   });
   dropzone.addEventListener("keydown", (e) => {

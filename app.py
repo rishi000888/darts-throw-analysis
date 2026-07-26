@@ -26,6 +26,8 @@ from werkzeug.utils import secure_filename
 
 import pose_analysis
 import ai_coach
+import youtube_fetch
+import video_trim
 
 # --------------------------------------------------------------------------
 # Configuration
@@ -46,6 +48,12 @@ os.makedirs(THUMB_DIR, exist_ok=True)
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = MAX_CONTENT_LENGTH
+# The desktop app (desktop.py) runs this same app with debug=False, which
+# would otherwise cache the compiled template in memory for the process's
+# whole lifetime — editing templates/index.html wouldn't show up until the
+# window was closed and reopened. Force template reload regardless of debug
+# mode so a template edit is only ever one page-refresh away.
+app.config["TEMPLATES_AUTO_RELOAD"] = True
 
 
 # --------------------------------------------------------------------------
@@ -114,6 +122,38 @@ def _generate_thumbnail(filepath, thumb_path):
     return success
 
 
+def _build_entry(video_id, stored_path, display_name):
+    """Turn a video file already sitting at `stored_path` into a library
+    entry — metadata + thumbnail. Shared by the upload and YouTube routes,
+    which differ only in how the file got onto disk. Returns None (and
+    removes the file) if it can't be read as a video."""
+    metadata = _extract_metadata(stored_path)
+    if metadata is None:
+        os.remove(stored_path)
+        return None
+
+    thumb_name = f"{video_id}.jpg"
+    thumb_path = os.path.join(THUMB_DIR, thumb_name)
+    _generate_thumbnail(stored_path, thumb_path)
+
+    stored_name = os.path.basename(stored_path)
+    return {
+        "id": video_id,
+        "display_name": display_name,
+        "stored_name": stored_name,
+        "video_url": f"/static/uploads/videos/{stored_name}",
+        "thumbnail_url": f"/static/uploads/thumbnails/{thumb_name}",
+        "file_size": os.path.getsize(stored_path),
+        "file_size_readable": _human_size(os.path.getsize(stored_path)),
+        "width": metadata["width"],
+        "height": metadata["height"],
+        "fps": metadata["fps"],
+        "frame_count": metadata["frame_count"],
+        "duration": metadata["duration"],
+        "uploaded_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
 # --------------------------------------------------------------------------
 # Page route
 # --------------------------------------------------------------------------
@@ -170,32 +210,12 @@ def upload_videos():
         stored_path = os.path.join(UPLOAD_DIR, stored_name)
         file.save(stored_path)
 
-        metadata = _extract_metadata(stored_path)
-        if metadata is None:
-            os.remove(stored_path)
+        display_name = os.path.splitext(original_name)[0]
+        entry = _build_entry(video_id, stored_path, display_name)
+        if entry is None:
             errors.append(f"{file.filename}: could not be read as a video file.")
             continue
 
-        thumb_name = f"{video_id}.jpg"
-        thumb_path = os.path.join(THUMB_DIR, thumb_name)
-        _generate_thumbnail(stored_path, thumb_path)
-
-        display_name = os.path.splitext(original_name)[0]
-        entry = {
-            "id": video_id,
-            "display_name": display_name,
-            "stored_name": stored_name,
-            "video_url": f"/static/uploads/videos/{stored_name}",
-            "thumbnail_url": f"/static/uploads/thumbnails/{thumb_name}",
-            "file_size": os.path.getsize(stored_path),
-            "file_size_readable": _human_size(os.path.getsize(stored_path)),
-            "width": metadata["width"],
-            "height": metadata["height"],
-            "fps": metadata["fps"],
-            "frame_count": metadata["frame_count"],
-            "duration": metadata["duration"],
-            "uploaded_at": datetime.now(timezone.utc).isoformat(),
-        }
         library.append(entry)
         created.append(entry)
 
@@ -206,6 +226,86 @@ def upload_videos():
 
     status = 201 if created else 400
     return jsonify({"created": created, "errors": errors}), status
+
+
+# --------------------------------------------------------------------------
+# API: add a video by downloading it from YouTube (yt-dlp, youtube_fetch.py)
+# --------------------------------------------------------------------------
+
+@app.route("/api/youtube", methods=["POST"])
+def add_from_youtube():
+    library = _load_library()
+    if len(library) >= MAX_VIDEOS:
+        return jsonify({"error": f"Library already has the maximum of {MAX_VIDEOS} videos."}), 400
+
+    data = request.get_json(silent=True) or {}
+    url = (data.get("url") or "").strip()
+    if not url:
+        return jsonify({"error": "Paste a YouTube URL first."}), 400
+
+    video_id = uuid.uuid4().hex[:12]
+    try:
+        stored_path, _ext, title = youtube_fetch.fetch(url, UPLOAD_DIR, video_id)
+    except youtube_fetch.FetchError as err:
+        return jsonify({"error": str(err)}), 400
+
+    entry = _build_entry(video_id, stored_path, title)
+    if entry is None:
+        return jsonify({"error": "That video downloaded but couldn't be read as a video file."}), 400
+
+    library.append(entry)
+    _save_library(library)
+    return jsonify({"created": [entry]}), 201
+
+
+# --------------------------------------------------------------------------
+# API: trim a video down to a shorter clip (video_trim.py) — adds the
+# result as a new library entry rather than replacing the original, so a
+# clip with more than one player still has its full recording kept around.
+# --------------------------------------------------------------------------
+
+@app.route("/api/videos/<video_id>/trim", methods=["POST"])
+def trim_video(video_id):
+    library = _load_library()
+    entry = next((e for e in library if e["id"] == video_id), None)
+    if entry is None:
+        return jsonify({"error": "Video not found."}), 404
+
+    if len(library) >= MAX_VIDEOS:
+        return jsonify({"error": f"Library already has the maximum of {MAX_VIDEOS} videos."}), 400
+
+    data = request.get_json(silent=True) or {}
+    try:
+        start = float(data.get("start"))
+        end = float(data.get("end"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "start and end must be numbers, in seconds."}), 400
+
+    if start < 0:
+        return jsonify({"error": "Start time can't be negative."}), 400
+    if end <= start:
+        return jsonify({"error": "End time must be after start time."}), 400
+
+    duration = entry.get("duration") or 0
+    if duration and end > duration + 0.5:
+        return jsonify({"error": f"End time is past the end of the video ({duration:.2f}s)."}), 400
+
+    src_path = os.path.join(UPLOAD_DIR, entry["stored_name"])
+    new_id = uuid.uuid4().hex[:12]
+    dest_path = os.path.join(UPLOAD_DIR, f"{new_id}.mp4")
+
+    try:
+        video_trim.trim(src_path, dest_path, start, end)
+    except video_trim.TrimError as err:
+        return jsonify({"error": str(err)}), 400
+
+    new_entry = _build_entry(new_id, dest_path, f"{entry['display_name']} (trimmed)")
+    if new_entry is None:
+        return jsonify({"error": "Trimmed clip could not be read as a video."}), 400
+
+    library.append(new_entry)
+    _save_library(library)
+    return jsonify({"created": [new_entry]}), 201
 
 
 # --------------------------------------------------------------------------

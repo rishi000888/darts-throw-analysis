@@ -10,6 +10,21 @@ frame-accurate, slow-motion video player, plus AI pose-detection scoring.
   needed. Opens a live preview via `getUserMedia`, records with
   `MediaRecorder`, and feeds the clip into the same upload pipeline as a
   picked file once you hit "Use This Recording".
+- **Add from YouTube** (`youtube_fetch.py`): paste a YouTube link — a
+  coaching clip, a pro's technique, one of your own uploads — and it's
+  downloaded straight into the library via `yt-dlp`, same as a picked or
+  recorded file. Capped at 10 minutes per clip (`YOUTUBE_MAX_DURATION` env
+  var to change it) and restricted to pre-muxed formats so no system
+  `ffmpeg` install is required.
+- **Trim a clip down before analyzing it** (`video_trim.py`): a toolbar
+  under the timeline — "Mark Start" / "Mark End" set an in/out point from
+  wherever the player's currently paused, then "Create Trimmed Clip" cuts
+  that range into a new library entry (the original is left untouched).
+  Meant for cutting a long or shared recording (e.g. two players taking
+  turns on one camera) down to just the throws worth scoring — pose
+  detection runs on every frame, so trimming first is much faster than
+  analyzing the whole thing. Uses a bundled ffmpeg binary
+  (`imageio-ffmpeg`), no system install required.
 - Video library with thumbnail, duration, file size, rename, and delete
 - Custom video player: play / pause / stop, frame-by-frame stepping,
   fullscreen, mute, volume
@@ -141,6 +156,14 @@ next time either is started. Nothing to keep in sync manually.
 - Camera recording needs browser permission for the camera and, outside of
   `localhost`, an HTTPS origin — `getUserMedia` is blocked on plain HTTP for
   any other host.
+- Add from YouTube runs the download synchronously in the request, same as
+  upload — the request just hangs until it's done, so keep clips short.
+  Only respect this for content you have the right to download (your own
+  uploads, or clips whose owner allows it) — YouTube's Terms of Service
+  restrict downloading other creators' videos. Private, age-restricted, or
+  region-locked videos will fail to download; cloud hosts (e.g. Render) may
+  also have their IPs rate-limited or blocked by YouTube, so this is most
+  reliable running locally.
 - Possible next steps: PDF report export and multi-video side-by-side
   comparison — the video library already supports up to 20 videos, which was
   built with that in mind.

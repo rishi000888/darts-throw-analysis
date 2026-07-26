@@ -9,4 +9,6 @@ mediapipe==0.10.35
 anthropic
 openai
 google-genai
+yt-dlp
+imageio-ffmpeg
 gunicorn==22.0.0

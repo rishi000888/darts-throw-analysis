@@ -218,6 +218,9 @@
           <div class="video-card__sub">${formatTime(video.duration)} &middot; ${video.file_size_readable}</div>
         </div>
         <div class="video-card__actions">
+          <button class="video-card__icon-btn download" title="Download" aria-label="Download">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 4v11M7.5 11.5 12 16l4.5-4.5M5 19h14" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
           <button class="video-card__icon-btn rename" title="Rename" aria-label="Rename">
             <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z" stroke-linecap="round" stroke-linejoin="round"/></svg>
           </button>
@@ -228,6 +231,7 @@
       `;
 
       card.addEventListener("click", (e) => {
+        if (e.target.closest(".download")) { downloadVideo(video); return; }
         if (e.target.closest(".rename")) { openRenameModal(video.id); return; }
         if (e.target.closest(".delete")) { deleteVideo(video.id); return; }
         loadVideo(video.id);
@@ -517,6 +521,16 @@
   }
 
   aiAnalyzeBtn.addEventListener("click", runAiAnalysis);
+
+  function downloadVideo(video) {
+    const ext = (video.stored_name.split(".").pop() || "mp4");
+    const link = document.createElement("a");
+    link.href = video.video_url;
+    link.download = `${video.display_name}.${ext}`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+  }
 
   async function deleteVideo(id) {
     const video = library.find((v) => v.id === id);

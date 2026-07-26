@@ -25,7 +25,9 @@ frame-accurate, slow-motion video player, plus AI pose-detection scoring.
   detection runs on every frame, so trimming first is much faster than
   analyzing the whole thing. Uses a bundled ffmpeg binary
   (`imageio-ffmpeg`), no system install required.
-- Video library with thumbnail, duration, file size, rename, and delete
+- Video library with thumbnail, duration, file size, rename, delete, and
+  download (saves the file locally — handy for pulling a trimmed clip back
+  out to analyze elsewhere)
 - Custom video player: play / pause / stop, frame-by-frame stepping,
   fullscreen, mute, volume
 - Draggable timeline with live time and frame counter
@@ -62,12 +64,20 @@ frame-accurate, slow-motion video player, plus AI pose-detection scoring.
   Without a key, that mode returns a clear error and Quick Answers still
   works.
 - **Analyze by AI**: a "Start Analysis" scores your throw against a fixed
-  heuristic formula — this instead sends those same measured numbers to an
-  LLM and asks it to write a full, standalone coaching take, since the
-  heuristic labels are an approximation, not a certified rating. Uses the
-  same bring-your-own-key/provider modal as Ask AI's "AI Chat" mode (they
-  share the saved key), and the result is cached per video and provider in
-  `library.json` so revisiting a throw doesn't re-spend an API call.
+  heuristic formula — this instead sends those same measured numbers **plus
+  a handful of actual reference frames from the best throw** to an LLM and
+  asks it to write a full, standalone coaching take that describes what it
+  actually sees (stance, grip, arm position, follow-through), not just what
+  the numbers say — the heuristic labels are an approximation, not a
+  certified rating, and elbow/wrist tracking alone can't capture everything
+  worth commenting on. Works with Claude, GPT, and Gemini, all of which
+  support image input; frames are resized down before sending to keep the
+  request small and fast. Uses the same bring-your-own-key/provider modal
+  as Ask AI's "AI Chat" mode (they share the saved key), and the result is
+  cached per video and provider in `library.json` so revisiting a throw
+  doesn't re-spend an API call. (Ask AI's interactive Q&A stays text-only —
+  only Analyze by AI sends images, since attaching frames to every back-
+  and-forth question would be slower and costlier for little benefit.)
 - Fully responsive: 3-column layout on desktop, stacked on tablet/phone,
   touch-friendly controls
 - Dark, sports-themed UI (blue / green / white accents)

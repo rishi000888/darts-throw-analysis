@@ -41,6 +41,7 @@ formulas are a reasonable first approximation:
 - Overall score (per throw): elbow and wrist weighted evenly.
 """
 
+import base64
 import math
 import os
 import statistics
@@ -204,6 +205,39 @@ def _extract_landmark_stream(video_path, arm):
     cap.release()
     elbow_angles = _median_filter_by_frame(elbow_angles, window=3)
     return fps, width, height, elbow_angles, wrist_pos, elbow_pos, frame_index
+
+
+def extract_frame_images(video_path, frame_indices, max_dim=768, jpeg_quality=80):
+    """Grab specific frames from the video as base64-encoded JPEG strings.
+
+    Used to give an AI analysis request actual visual context instead of
+    just the tracked numbers — the elbow/wrist measurements alone can't
+    tell an LLM what someone's stance, grip, or release actually looked
+    like. Frames are resized down (a vision model doesn't need full
+    resolution, and smaller images mean a faster, cheaper request) and
+    re-read directly from disk by seeking to each frame index — this is a
+    handful of frame grabs, not a second full pose-detection pass.
+    """
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        return []
+
+    images = []
+    for idx in frame_indices:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+        ok, frame = cap.read()
+        if not ok:
+            continue
+        h, w = frame.shape[:2]
+        scale = min(1.0, max_dim / max(h, w))
+        if scale < 1.0:
+            frame = cv2.resize(frame, (int(w * scale), int(h * scale)))
+        ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, jpeg_quality])
+        if ok:
+            images.append(base64.b64encode(buf).decode("ascii"))
+
+    cap.release()
+    return images
 
 
 def _wrist_speed_series(wrist_pos, fps, diagonal):

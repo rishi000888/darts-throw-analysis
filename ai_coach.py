@@ -19,6 +19,7 @@ Which mode/provider is used is a per-request choice made by the caller
 (the frontend toggle) — this module doesn't decide that itself.
 """
 
+import base64
 import os
 
 try:
@@ -36,6 +37,7 @@ except ImportError:
 try:
     from google import genai
     from google.genai import errors as genai_errors
+    from google.genai import types as genai_types
     GEMINI_SDK_AVAILABLE = True
 except ImportError:
     GEMINI_SDK_AVAILABLE = False
@@ -183,9 +185,15 @@ def _resolve_key(provider, api_key):
     return None
 
 
-def _anthropic_answer(question, context, key, model):
+def _anthropic_answer(question, context, key, model, images=None):
     if not ANTHROPIC_SDK_AVAILABLE:
         raise CoachError("The anthropic package isn't installed on the server.")
+
+    content = [
+        {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": img}}
+        for img in (images or [])
+    ]
+    content.append({"type": "text", "text": f"Throw analysis:\n{context}\n\nQuestion: {question}"})
 
     client = anthropic.Anthropic(api_key=key)
     try:
@@ -193,10 +201,7 @@ def _anthropic_answer(question, context, key, model):
             model=model,
             max_tokens=1024,
             system=SYSTEM_PROMPT,
-            messages=[{
-                "role": "user",
-                "content": f"Throw analysis:\n{context}\n\nQuestion: {question}",
-            }],
+            messages=[{"role": "user", "content": content}],
         )
     except anthropic.AuthenticationError as err:
         raise CoachError("That API key was rejected by Anthropic — double-check it and try again.") from err
@@ -212,9 +217,13 @@ def _anthropic_answer(question, context, key, model):
     return text or "(no response text)"
 
 
-def _openai_answer(question, context, key, model):
+def _openai_answer(question, context, key, model, images=None):
     if not OPENAI_SDK_AVAILABLE:
         raise CoachError("The openai package isn't installed on the server.")
+
+    content = [{"type": "text", "text": f"Throw analysis:\n{context}\n\nQuestion: {question}"}]
+    for img in (images or []):
+        content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img}"}})
 
     client = openai.OpenAI(api_key=key)
     try:
@@ -223,7 +232,7 @@ def _openai_answer(question, context, key, model):
             max_tokens=1024,
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": f"Throw analysis:\n{context}\n\nQuestion: {question}"},
+                {"role": "user", "content": content},
             ],
         )
     except openai.AuthenticationError as err:
@@ -237,15 +246,21 @@ def _openai_answer(question, context, key, model):
     return text or "(no response text)"
 
 
-def _gemini_answer(question, context, key, model):
+def _gemini_answer(question, context, key, model, images=None):
     if not GEMINI_SDK_AVAILABLE:
         raise CoachError("The google-genai package isn't installed on the server.")
+
+    contents = [
+        genai_types.Part.from_bytes(data=base64.b64decode(img), mime_type="image/jpeg")
+        for img in (images or [])
+    ]
+    contents.append(f"Throw analysis:\n{context}\n\nQuestion: {question}")
 
     client = genai.Client(api_key=key)
     try:
         response = client.models.generate_content(
             model=model,
-            contents=f"Throw analysis:\n{context}\n\nQuestion: {question}",
+            contents=contents,
             config={"system_instruction": SYSTEM_PROMPT, "max_output_tokens": 1024},
         )
     except genai_errors.ClientError as err:
@@ -267,7 +282,7 @@ PROVIDERS = {
 PROVIDER_LABELS = {"anthropic": "Anthropic", "openai": "OpenAI", "gemini": "Google"}
 
 
-def llm_answer(question, analysis, provider="anthropic", api_key=None, model=None):
+def llm_answer(question, analysis, provider="anthropic", api_key=None, model=None, images=None):
     if provider not in PROVIDERS:
         raise CoachError(f"Unknown AI provider '{provider}'.")
 
@@ -277,7 +292,7 @@ def llm_answer(question, analysis, provider="anthropic", api_key=None, model=Non
 
     context = _analysis_context_text(analysis)
     resolved_model = model or DEFAULT_MODELS[provider]
-    return PROVIDERS[provider](question, context, key, resolved_model)
+    return PROVIDERS[provider](question, context, key, resolved_model, images=images)
 
 
 def answer_question(question, analysis, mode, provider="anthropic", api_key=None, model=None):
@@ -300,15 +315,18 @@ def answer_question(question, analysis, mode, provider="anthropic", api_key=None
 
 AI_ANALYSIS_PROMPT = (
     "Give a full, standalone coaching write-up for this session — don't just restate the "
-    "numbers and their computed labels, interpret them with your own judgment. The elbow/"
-    "wrist scores and Excellent/Very Good/Good/Needs Work labels above are from a simple "
-    "heuristic formula, not a certified rating, so weigh the raw numbers (angle range, "
-    "wrist speed, release timing) yourself rather than treating those labels as ground "
-    "truth. For each throw, assess technique in plain coaching language and call out the "
-    "single biggest thing to improve. Then summarize consistency across all throws and "
-    "suggest one concrete drill or cue to work on next. Keep it concise and actionable."
+    "numbers and their computed labels, interpret them with your own judgment. If reference "
+    "frames from the throw are attached as images, actually look at them and describe what "
+    "you see — stance, grip, arm position, follow-through, anything visually notable — "
+    "rather than only reasoning from the numbers. The elbow/wrist scores and Excellent/Very "
+    "Good/Good/Needs Work labels are from a simple heuristic formula, not a certified "
+    "rating, so weigh the raw numbers (angle range, wrist speed, release timing) together "
+    "with what the images show (if any), rather than treating those labels as ground truth. "
+    "For each throw, assess technique in plain coaching language and call out the single "
+    "biggest thing to improve. Then summarize consistency across all throws and suggest one "
+    "concrete drill or cue to work on next. Keep it concise and actionable."
 )
 
 
-def ai_analyze(analysis, provider="anthropic", api_key=None, model=None):
-    return llm_answer(AI_ANALYSIS_PROMPT, analysis, provider=provider, api_key=api_key, model=model)
+def ai_analyze(analysis, provider="anthropic", api_key=None, model=None, images=None):
+    return llm_answer(AI_ANALYSIS_PROMPT, analysis, provider=provider, api_key=api_key, model=model, images=images)

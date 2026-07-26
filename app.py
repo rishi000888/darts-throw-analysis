@@ -426,6 +426,30 @@ def coach(video_id):
 # the same video is instant unless the provider changes or force=1.
 # --------------------------------------------------------------------------
 
+MAX_AI_REFERENCE_FRAMES = 5
+
+
+def _reference_frame_indices(analysis, max_frames=MAX_AI_REFERENCE_FRAMES):
+    """Pick a handful of frame indices spanning the best throw's window, to
+    attach as images to an AI analysis request — the numbers alone can't
+    show an LLM what the throw actually looked like."""
+    throws = analysis.get("throws") or []
+    if not throws:
+        return []
+
+    best_number = analysis.get("comparison", {}).get("best_throw_number")
+    throw = next((t for t in throws if t["throw_number"] == best_number), throws[0])
+    start, end = throw["window_start_frame"], throw["window_end_frame"]
+    if end <= start:
+        return [start]
+
+    count = min(max_frames, end - start + 1)
+    if count <= 1:
+        return [start]
+    step = (end - start) / (count - 1)
+    return sorted({round(start + i * step) for i in range(count)})
+
+
 @app.route("/api/ai-analyze/<video_id>", methods=["POST"])
 def ai_analyze_video(video_id):
     library = _load_library()
@@ -450,8 +474,11 @@ def ai_analyze_video(video_id):
     if cached and cached.get("provider") == provider and not force:
         return jsonify({"result": cached["text"], "cached": True})
 
+    video_path = os.path.join(UPLOAD_DIR, entry["stored_name"])
+    images = pose_analysis.extract_frame_images(video_path, _reference_frame_indices(analysis))
+
     try:
-        text = ai_coach.ai_analyze(analysis, provider=provider, api_key=api_key, model=model)
+        text = ai_coach.ai_analyze(analysis, provider=provider, api_key=api_key, model=model, images=images)
     except ai_coach.CoachError as err:
         return jsonify({"error": str(err)}), 400
 

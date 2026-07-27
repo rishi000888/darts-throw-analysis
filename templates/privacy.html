@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1">
+<title>Privacy Policy — Darts Throw Analysis</title>
+<link href="https://fonts.googleapis.com/css2?family=Oswald:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+<style>
+  .legal { max-width: 760px; margin: 0 auto; padding: 48px 24px 96px; line-height: 1.65; color: var(--text); }
+  .legal h1 { font-family: 'Oswald', sans-serif; font-size: 2rem; margin-bottom: 4px; }
+  .legal .updated { color: var(--text-faint); margin-bottom: 32px; }
+  .legal h2 { font-family: 'Oswald', sans-serif; font-size: 1.25rem; margin-top: 32px; margin-bottom: 8px; color: var(--blue); }
+  .legal p, .legal li { color: var(--text-dim); }
+  .legal ul { padding-left: 20px; }
+  .legal a { color: var(--blue); }
+</style>
+</head>
+<body>
+<div class="legal">
+  <h1>Privacy Policy</h1>
+  <p class="updated">Last updated: July 28, 2026</p>
+
+  <p>Darts Throw Analysis ("the app") is a tool for recording a dart-throw video and
+  getting AI-based coaching feedback on your technique. This page explains what data
+  the app collects and how it's used, for both the mobile app and the web app.</p>
+
+  <h2>What we collect</h2>
+  <ul>
+    <li><strong>Video you record or choose.</strong> When you record a throw with your
+    camera, or pick an existing video, that file is uploaded to our server so it can be
+    analyzed. We don't access your camera, microphone, or media library for any other
+    purpose, and we don't collect video in the background.</li>
+    <li><strong>Analysis results.</strong> The scores and feedback generated from your
+    video (elbow stability, wrist snap, etc.) are stored alongside the video so you can
+    revisit them without re-analyzing.</li>
+    <li><strong>Nothing else.</strong> We don't collect your name, contacts, location,
+    or device identifiers, and we don't use analytics or advertising SDKs.</li>
+  </ul>
+
+  <h2>How your video is used</h2>
+  <p>Uploaded videos are processed on our server using an on-device pose-detection
+  model (MediaPipe) to compute throw-mechanics scores. Videos and their results are
+  stored on our hosting provider only for as long as needed to show them back to you
+  in the app's library, and you can delete any video yourself at any time from the
+  library screen. We don't sell or share your videos with third parties.</p>
+
+  <h2>Saving videos to your device</h2>
+  <p>The "download" option in the video library saves a copy of your video to your
+  device's own photo/video gallery. That copy is then entirely under your device's
+  normal storage and permissions — we have no access to it once saved.</p>
+
+  <h2>Purchases</h2>
+  <p>The optional lifetime-unlock purchase is processed entirely by Google Play
+  Billing. We don't receive or store your payment details — Google handles the
+  transaction and simply tells the app whether the purchase succeeded.</p>
+
+  <h2>Permissions the mobile app requests</h2>
+  <ul>
+    <li><strong>Camera &amp; microphone</strong> — to record a throw video from within the app.</li>
+    <li><strong>Photos/videos (gallery)</strong> — to let you pick an existing clip, or save an analyzed one back to your device.</li>
+    <li><strong>Internet</strong> — to upload your video and fetch analysis results.</li>
+  </ul>
+
+  <h2>Children's privacy</h2>
+  <p>This app is not directed at children under 13, and we do not knowingly collect
+  data from children.</p>
+
+  <h2>Changes to this policy</h2>
+  <p>If this policy changes, the updated version will be posted on this page with a
+  new "last updated" date.</p>
+
+  <h2>Contact</h2>
+  <p>Questions about this policy or your data can be sent to
+  <a href="mailto:rishi000888@gmail.com">rishi000888@gmail.com</a>.</p>
+</div>
+</body>
+</html>

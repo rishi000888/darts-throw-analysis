@@ -10,6 +10,13 @@ FROM python:3.11-slim
 # inside ctypes.CDLL()/_dlopen() with no video-related error message, which
 # is easy to mistake for a memory or video-size problem — it happens on
 # every request, instantly, regardless of what's being analyzed.
+#
+# libegl1 + libgles2 are also MediaPipe's, not OpenCV's — its compiled
+# library references GPU/OpenGL ES code paths even though this app only
+# ever runs CPU inference, and python:3.11-slim has neither by default.
+# Missing either surfaces the same way as the libgomp1 issue: an instant
+# 500 on every /api/analyze request, failing inside ctypes.CDLL()/_dlopen()
+# before any video is touched, easy to mistake for a size/memory problem.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libgl1 \
     libglib2.0-0 \
@@ -17,6 +24,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxext6 \
     libxrender1 \
     libgomp1 \
+    libegl1 \
+    libgles2 \
     curl \
     && rm -rf /var/lib/apt/lists/*
 

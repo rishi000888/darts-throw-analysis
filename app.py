@@ -21,7 +21,9 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 import cv2
+import google.auth
 from flask import Flask, jsonify, render_template, request, send_from_directory
+from google.auth.transport import requests as google_auth_requests
 from google.cloud import storage as gcs
 from werkzeug.utils import secure_filename
 
@@ -58,6 +60,25 @@ def _get_storage_client():
     if _storage_client is None:
         _storage_client = gcs.Client()
     return _storage_client
+
+
+def _generate_signed_url(blob, method, content_type, expiration_minutes=20):
+    """Cloud Run's default credentials have no private key, so
+    Blob.generate_signed_url() can't sign locally like it can with a
+    downloaded service-account JSON key. Passing the service account's own
+    email + a fresh access token makes it sign via the IAM API instead
+    (the roles/iam.serviceAccountTokenCreator grant on itself is what
+    allows that)."""
+    credentials, _ = google.auth.default()
+    credentials.refresh(google_auth_requests.Request())
+    return blob.generate_signed_url(
+        version="v4",
+        expiration=timedelta(minutes=expiration_minutes),
+        method=method,
+        content_type=content_type,
+        service_account_email=credentials.service_account_email,
+        access_token=credentials.token,
+    )
 
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(THUMB_DIR, exist_ok=True)
@@ -276,12 +297,7 @@ def create_upload_url():
 
     bucket = _get_storage_client().bucket(GCS_BUCKET_NAME)
     blob = bucket.blob(blob_name)
-    upload_url = blob.generate_signed_url(
-        version="v4",
-        expiration=timedelta(minutes=20),
-        method="PUT",
-        content_type=content_type,
-    )
+    upload_url = _generate_signed_url(blob, "PUT", content_type)
 
     return jsonify({
         "video_id": video_id,

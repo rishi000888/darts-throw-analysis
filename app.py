@@ -18,10 +18,11 @@ that's the hook Phase 2 will replace with real OpenCV/MediaPipe logic.
 import json
 import os
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import cv2
 from flask import Flask, jsonify, render_template, request, send_from_directory
+from google.cloud import storage as gcs
 from werkzeug.utils import secure_filename
 
 import pose_analysis
@@ -42,6 +43,21 @@ ALLOWED_EXTENSIONS = {"mp4", "mov", "avi", "webm"}
 VALID_ARMS = {"left", "right"}
 MAX_VIDEOS = 20
 MAX_CONTENT_LENGTH = 2000 * 1024 * 1024  # 2 GB total request cap (scaled with MAX_VIDEOS)
+
+# Cloud Run enforces a hard ~32MB limit on request bodies, which the direct
+# /api/upload route above can't get around no matter how big MAX_CONTENT_LENGTH
+# is. Large recordings instead go straight to this bucket via a signed URL
+# (see /api/upload-url + /api/upload-complete), bypassing Cloud Run's ingress
+# entirely for the big file transfer.
+GCS_BUCKET_NAME = os.environ.get("GCS_BUCKET_NAME", "darts-throw-analysis-videos")
+_storage_client = None
+
+
+def _get_storage_client():
+    global _storage_client
+    if _storage_client is None:
+        _storage_client = gcs.Client()
+    return _storage_client
 
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(THUMB_DIR, exist_ok=True)
@@ -231,6 +247,82 @@ def upload_videos():
 
     status = 201 if created else 400
     return jsonify({"created": created, "errors": errors}), status
+
+
+# --------------------------------------------------------------------------
+# API: large-video upload path (bypasses Cloud Run's ~32MB request limit)
+#
+# The client asks here first for a short-lived signed URL, PUTs the raw
+# video bytes straight to Cloud Storage (never touching this Flask app),
+# then calls /api/upload-complete so the server pulls it down locally and
+# runs it through the same _build_entry() pipeline as a normal upload.
+# --------------------------------------------------------------------------
+
+@app.route("/api/upload-url", methods=["POST"])
+def create_upload_url():
+    library = _load_library()
+    if len(library) >= MAX_VIDEOS:
+        return jsonify({"error": f"Library already has the maximum of {MAX_VIDEOS} videos."}), 400
+
+    data = request.get_json(silent=True) or {}
+    original_name = secure_filename(data.get("filename") or "video.mp4")
+    if not _allowed_file(original_name):
+        return jsonify({"error": "Unsupported format (use MP4, MOV, AVI, or WEBM)."}), 400
+
+    ext = original_name.rsplit(".", 1)[1].lower()
+    video_id = uuid.uuid4().hex[:12]
+    blob_name = f"pending-uploads/{video_id}.{ext}"
+    content_type = data.get("content_type") or "application/octet-stream"
+
+    bucket = _get_storage_client().bucket(GCS_BUCKET_NAME)
+    blob = bucket.blob(blob_name)
+    upload_url = blob.generate_signed_url(
+        version="v4",
+        expiration=timedelta(minutes=20),
+        method="PUT",
+        content_type=content_type,
+    )
+
+    return jsonify({
+        "video_id": video_id,
+        "blob_name": blob_name,
+        "upload_url": upload_url,
+        "content_type": content_type,
+    }), 200
+
+
+@app.route("/api/upload-complete/<video_id>", methods=["POST"])
+def complete_upload(video_id):
+    library = _load_library()
+    if len(library) >= MAX_VIDEOS:
+        return jsonify({"error": f"Library already has the maximum of {MAX_VIDEOS} videos."}), 400
+
+    data = request.get_json(silent=True) or {}
+    blob_name = data.get("blob_name")
+    original_name = secure_filename(data.get("filename") or "video.mp4")
+    if not blob_name or video_id not in blob_name:
+        return jsonify({"error": "Missing or invalid blob_name."}), 400
+
+    bucket = _get_storage_client().bucket(GCS_BUCKET_NAME)
+    blob = bucket.blob(blob_name)
+    if not blob.exists():
+        return jsonify({"error": "Upload not found in storage — it may have expired, please try again."}), 404
+
+    ext = blob_name.rsplit(".", 1)[1].lower()
+    stored_name = f"{video_id}.{ext}"
+    stored_path = os.path.join(UPLOAD_DIR, stored_name)
+    blob.download_to_filename(stored_path)
+    blob.delete()
+
+    display_name = os.path.splitext(original_name)[0]
+    entry = _build_entry(video_id, stored_path, display_name)
+    if entry is None:
+        return jsonify({"error": "Uploaded file could not be read as a video."}), 400
+
+    library.append(entry)
+    _save_library(library)
+
+    return jsonify({"created": [entry], "errors": []}), 201
 
 
 # --------------------------------------------------------------------------

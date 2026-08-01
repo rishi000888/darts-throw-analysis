@@ -12,3 +12,4 @@ google-genai
 yt-dlp
 imageio-ffmpeg
 gunicorn==22.0.0
+google-cloud-storage

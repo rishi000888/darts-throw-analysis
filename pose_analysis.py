@@ -80,8 +80,11 @@ MIN_PLAUSIBLE_ELBOW_ANGLE = 20  # degrees — a real elbow doesn't fold tighter 
                                  # confidently (most often the arm briefly lining up with the camera's
                                  # line of sight at release, which 2D landmark math can't represent)
 
-PEAK_HEIGHT_RATIO = 0.35        # a throw's peak speed must clear this fraction of the video's fastest peak
-MIN_THROW_GAP_SEC = 1.0         # throws must be at least this far apart
+PEAK_HEIGHT_RATIO = 0.55        # a throw's peak speed must clear this fraction of the video's fastest peak —
+                                 # raised from 0.35 because slower incidental motion (walking to the board,
+                                 # picking darts back up, resetting stance) was clearing too low a bar and
+                                 # getting counted as extra throws
+MIN_THROW_GAP_SEC = 1.2         # throws must be at least this far apart
 PRE_RELEASE_WINDOW_SEC = 0.8    # how far back a throw's window starts, before its release frame
 POST_RELEASE_WINDOW_SEC = 0.3   # how far past release a throw's window extends
 DIRECTION_MIN_DRIFT_PCT = 1.5   # % of frame diagonal an elbow must move to count as a real drift, not noise

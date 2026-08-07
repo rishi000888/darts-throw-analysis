@@ -46,4 +46,11 @@ RUN mkdir -p models && \
 RUN mkdir -p static/uploads/videos static/uploads/thumbnails
 
 # Render injects $PORT at runtime; shell-form CMD is required so it expands.
-CMD gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --threads 4 --timeout 120
+# --timeout 280 (not the default 30, and not the old 120) keeps gunicorn from
+# killing the worker mid-request on a longer/higher-res /api/analyze call —
+# pose detection runs synchronously in-request (see pose_analysis.py) and can
+# take close to a minute even on a modest clip, more on Cloud Run's allocated
+# CPU. 280s stays just under Cloud Run's own default 300s request timeout, so
+# a genuinely-too-long request still fails with Cloud Run's own timeout
+# response instead of this timeout firing first and looking like a hang.
+CMD gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --threads 4 --timeout 280

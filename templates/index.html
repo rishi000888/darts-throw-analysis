@@ -259,6 +259,45 @@
       <p class="panel__note" id="analysis-note">Click "Start Analysis" below to run AI pose detection on this throw.</p>
     </div>
 
+    <div class="panel panel--session">
+      <div class="panel__title-row">
+        <h3 class="panel__title">Two-Angle Stance Session</h3>
+        <span class="pill pill--ghost" id="session-count-pill">0 sessions</span>
+      </div>
+      <p class="panel__note">
+        Pick a side-view clip (the usual view above) and a front-view clip
+        &mdash; a second camera near the board, facing back at you &mdash; from
+        your library. Cross-referencing the two adds elbow flare direction,
+        wrist lateral snap, shoulder/hip torso alignment, and stance/foot
+        consistency: things a single side-on camera can't show. Uses the
+        same throwing arm and throw count set above.
+      </p>
+
+      <label class="field-label" for="session-side-select">Side view clip</label>
+      <select id="session-side-select" class="text-input"></select>
+
+      <label class="field-label" for="session-front-select">Front view clip</label>
+      <select id="session-front-select" class="text-input"></select>
+
+      <button class="btn btn--outline btn--full" id="session-create-btn" type="button">Create &amp; Analyze Session</button>
+      <p class="panel__note" id="session-status" aria-live="polite"></p>
+
+      <div class="session-list" id="session-list"></div>
+
+      <div id="session-results" hidden>
+        <p class="panel__note" id="session-comparison-summary"></p>
+        <div class="pictograph" id="session-pictograph" role="listbox" aria-label="Session throws"></div>
+        <dl class="info-list">
+          <div class="info-list__row"><dt>Elbow (side)</dt><dd class="placeholder" id="session-elbow">&#8211;&#8211;</dd></div>
+          <div class="info-list__row"><dt>Wrist (side)</dt><dd class="placeholder" id="session-wrist">&#8211;&#8211;</dd></div>
+          <div class="info-list__row"><dt>Elbow Flare (front)</dt><dd class="placeholder" id="session-elbow-flare">&#8211;&#8211;</dd></div>
+          <div class="info-list__row"><dt>Wrist Snap (front)</dt><dd class="placeholder" id="session-wrist-snap">&#8211;&#8211;</dd></div>
+          <div class="info-list__row"><dt>Torso Alignment</dt><dd class="placeholder" id="session-torso">&#8211;&#8211;</dd></div>
+        </dl>
+        <p class="panel__note" id="session-stance-note"></p>
+      </div>
+    </div>
+
     <div class="panel panel--ai-analysis">
       <div class="panel__title-row">
         <h3 class="panel__title">AI Analysis</h3>

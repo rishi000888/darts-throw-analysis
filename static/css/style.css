@@ -749,6 +749,60 @@ button { font-family: inherit; cursor: pointer; }
   cursor: pointer;
 }
 
+/* ---- Two-angle session panel: reuses .field-label/.text-input for the
+   side/front pickers and .pictograph for per-throw results, this is just
+   the small list of a user's already-created sessions ---- */
+
+.session-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.session-card {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.session-card:hover { border-color: var(--blue-dim); }
+
+.session-card.is-active {
+  border-color: var(--blue);
+  background: linear-gradient(180deg, rgba(37, 99, 235, 0.10), rgba(13, 148, 136, 0.05));
+}
+
+.session-card__name {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.session-card__delete {
+  width: 24px;
+  height: 24px;
+  border-radius: 7px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-faint);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.session-card__delete:hover { color: var(--bullseye); background: var(--surface); border-color: var(--border); }
+
 .chip--arm {
   flex: 1;
   text-align: center;

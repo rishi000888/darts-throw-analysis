@@ -122,6 +122,22 @@
   const aiAnalyzeBtn = document.getElementById("ai-analyze-btn");
   const aiAnalysisResult = document.getElementById("ai-analysis-result");
 
+  const sessionSideSelect = document.getElementById("session-side-select");
+  const sessionFrontSelect = document.getElementById("session-front-select");
+  const sessionCreateBtn = document.getElementById("session-create-btn");
+  const sessionStatus = document.getElementById("session-status");
+  const sessionList = document.getElementById("session-list");
+  const sessionCountPill = document.getElementById("session-count-pill");
+  const sessionResults = document.getElementById("session-results");
+  const sessionComparisonSummary = document.getElementById("session-comparison-summary");
+  const sessionPictograph = document.getElementById("session-pictograph");
+  const sessionElbow = document.getElementById("session-elbow");
+  const sessionWrist = document.getElementById("session-wrist");
+  const sessionElbowFlare = document.getElementById("session-elbow-flare");
+  const sessionWristSnap = document.getElementById("session-wrist-snap");
+  const sessionTorso = document.getElementById("session-torso");
+  const sessionStanceNote = document.getElementById("session-stance-note");
+
   const infoFilename = document.getElementById("info-filename");
   const infoResolution = document.getElementById("info-resolution");
   const infoFps = document.getElementById("info-fps");
@@ -155,6 +171,11 @@
   let pendingApiKeyCallback = null;   // run once a key is saved, when the modal was opened to unblock an action
   let apiKeyModalFromCoachToggle = false; // whether Cancel should fall back the coach mode toggle to "rule"
   let aiAnalysisBusy = false;
+
+  let sessions = [];            // two-angle sessions from GET /api/sessions
+  let activeSessionId = null;   // id of the session whose results are currently shown, if any
+  let sessionSelectedThrowIndex = 0;
+  let sessionBusy = false;
 
   let mediaStream = null;      // active getUserMedia stream, while the record modal is open
   let mediaRecorder = null;
@@ -251,6 +272,8 @@
     videoCountPill.textContent = `${library.length} / ${MAX_VIDEOS} throws loaded`;
     addMoreBtn.disabled = library.length >= MAX_VIDEOS;
     addMoreBtn.style.opacity = library.length >= MAX_VIDEOS ? 0.5 : 1;
+
+    populateSessionSelects();
   }
 
   function escapeHtml(str) {
@@ -1042,6 +1065,256 @@
   });
 
   /* ------------------------------------------------------------------ *
+   * Two-angle stance sessions — pairs a side-view clip with a front-view
+   * clip, both already in the library above (no separate upload path —
+   * see app.py's "API: two-angle sessions"), and cross-references them
+   * for elbow flare direction, wrist lateral snap, torso alignment, and
+   * stance/foot consistency. Uses the same arm chip + throw-count field
+   * as the single-video panel above rather than duplicating those
+   * controls, since both videos are two cameras on the same throw
+   * session (same arm, same intended throw count).
+   * ------------------------------------------------------------------ */
+
+  function setSessionStatus(message, kind) {
+    sessionStatus.textContent = message || "";
+    sessionStatus.classList.remove("is-error", "is-success");
+    if (kind) sessionStatus.classList.add(kind === "error" ? "is-error" : "is-success");
+  }
+
+  function populateSessionSelects() {
+    if (!sessionSideSelect || !sessionFrontSelect) return;
+    const prevSide = sessionSideSelect.value;
+    const prevFront = sessionFrontSelect.value;
+
+    [sessionSideSelect, sessionFrontSelect].forEach((select) => {
+      select.innerHTML = library.length === 0
+        ? `<option value="">No throws uploaded yet</option>`
+        : library.map((v) => `<option value="${v.id}">${escapeHtml(v.display_name)}</option>`).join("");
+    });
+
+    if (library.some((v) => v.id === prevSide)) sessionSideSelect.value = prevSide;
+    if (library.some((v) => v.id === prevFront)) sessionFrontSelect.value = prevFront;
+
+    const enough = library.length >= 2;
+    sessionCreateBtn.disabled = !enough || sessionBusy;
+    sessionSideSelect.disabled = library.length === 0;
+    sessionFrontSelect.disabled = library.length === 0;
+  }
+
+  function renderSessionList() {
+    sessionCountPill.textContent = `${sessions.length} session${sessions.length === 1 ? "" : "s"}`;
+    sessionList.innerHTML = "";
+
+    sessions.forEach((session) => {
+      const card = document.createElement("div");
+      card.className = "session-card" + (session.id === activeSessionId ? " is-active" : "");
+      card.setAttribute("role", "button");
+      card.setAttribute("tabindex", "0");
+      card.innerHTML = `
+        <span class="session-card__name">${escapeHtml(session.display_name)}</span>
+        <button type="button" class="session-card__delete" title="Delete session" aria-label="Delete session">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
+      `;
+      card.addEventListener("click", (e) => {
+        if (e.target.closest(".session-card__delete")) { deleteSession(session.id); return; }
+        openSession(session);
+      });
+      card.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openSession(session); }
+      });
+      sessionList.appendChild(card);
+    });
+  }
+
+  async function fetchSessions() {
+    try {
+      const res = await fetch("/api/sessions");
+      sessions = await res.json();
+    } catch (err) {
+      sessions = [];
+    }
+    renderSessionList();
+  }
+
+  function clearSessionResults() {
+    activeSessionId = null;
+    sessionResults.hidden = true;
+    sessionPictograph.innerHTML = "";
+    renderSessionList();
+  }
+
+  function metricText(field) {
+    return field && field.summary ? field.summary : "Not enough data from the front-view video for this throw.";
+  }
+
+  function renderSessionThrowDetail(throw_) {
+    const elbow = throw_.elbow;
+    const wrist = throw_.wrist;
+    const front = throw_.front_view;
+
+    sessionElbow.textContent = `${elbow.score}% — ${elbow.label}`;
+    sessionElbow.className = `mono ${scoreClass(elbow.label)}`;
+
+    sessionWrist.textContent = `${wrist.score}% — ${wrist.label}`;
+    sessionWrist.className = `mono ${scoreClass(wrist.label)}`;
+
+    sessionElbowFlare.textContent = front ? metricText(front.elbow_flare_direction) : metricText(null);
+    sessionWristSnap.textContent = front ? metricText(front.wrist_lateral_snap) : metricText(null);
+    sessionTorso.textContent = front ? metricText(front.torso_alignment) : metricText(null);
+    [sessionElbowFlare, sessionWristSnap, sessionTorso].forEach((el) => { el.className = "mono"; });
+  }
+
+  function selectSessionThrow(index, analysis) {
+    sessionSelectedThrowIndex = Math.max(0, Math.min(index, analysis.throws.length - 1));
+    renderSessionThrowDetail(analysis.throws[sessionSelectedThrowIndex]);
+    sessionPictograph.querySelectorAll(".pictograph__bar").forEach((bar, i) => {
+      bar.classList.toggle("is-selected", i === sessionSelectedThrowIndex);
+      bar.setAttribute("aria-selected", i === sessionSelectedThrowIndex ? "true" : "false");
+    });
+  }
+
+  function renderSessionPictograph(analysis) {
+    sessionPictograph.innerHTML = "";
+    sessionPictograph.hidden = analysis.throws.length < 2;
+
+    analysis.throws.forEach((throw_, i) => {
+      const bar = document.createElement("button");
+      bar.type = "button";
+      bar.className = `pictograph__bar ${scoreClass(throw_.overall.label)}`;
+      bar.setAttribute("role", "option");
+      bar.setAttribute("aria-selected", "false");
+      bar.title = `Throw #${throw_.throw_number}: ${throw_.overall.score}% (${throw_.overall.label})`;
+      bar.innerHTML = `
+        <span class="pictograph__value">${throw_.overall.score}</span>
+        <span class="pictograph__fill" style="height:${Math.max(4, throw_.overall.score)}%"></span>
+        <span class="pictograph__label">#${throw_.throw_number}</span>
+      `;
+      bar.addEventListener("click", () => selectSessionThrow(i, analysis));
+      sessionPictograph.appendChild(bar);
+    });
+  }
+
+  function renderSessionAnalysis(analysis) {
+    sessionResults.hidden = false;
+    const c = analysis.comparison;
+    const armLabel = analysis.arm === "left" ? "left arm" : "right arm";
+    const mismatchNote = analysis.angle_mismatch
+      ? " The two clips didn't agree on throw count — extra throws only got side-view scoring."
+      : "";
+    sessionComparisonSummary.textContent = (analysis.throw_count > 1
+      ? `${analysis.throw_count} throws scored (${armLabel}) — average ${c.average_score}% (${c.average_label}), ` +
+        `best #${c.best_throw_number}, consistency ${c.consistency_score}% (${c.consistency_label}).`
+      : `1 throw scored in this session (${armLabel}).`) + mismatchNote;
+
+    renderSessionPictograph(analysis);
+    const bestIndex = analysis.throws.findIndex((t) => t.throw_number === c.best_throw_number);
+    selectSessionThrow(bestIndex >= 0 ? bestIndex : 0, analysis);
+
+    if (analysis.stance_consistency) {
+      sessionStanceNote.textContent = `Stance across throws: ${analysis.stance_consistency.summary}`;
+    } else {
+      sessionStanceNote.textContent = "Stance consistency needs at least two throws with clear foot visibility in the front-view clip.";
+    }
+  }
+
+  async function openSession(session) {
+    activeSessionId = session.id;
+    renderSessionList();
+    if (session.dual_analysis && session.dual_analysis.throws) {
+      renderSessionAnalysis(session.dual_analysis);
+      setSessionStatus("Showing this session's last analysis.", null);
+      return;
+    }
+    await analyzeSession(session.id);
+  }
+
+  async function analyzeSession(sessionId) {
+    const throwCount = parseInt(throwCountInput ? throwCountInput.value : "1", 10);
+    if (!Number.isInteger(throwCount) || throwCount < 1) {
+      setSessionStatus("Enter how many throws are in this session in the field above first.", "error");
+      if (throwCountInput) throwCountInput.focus();
+      return;
+    }
+
+    sessionBusy = true;
+    sessionCreateBtn.disabled = true;
+    setSessionStatus("Analyzing both angles — this takes about twice as long as a single video…", null);
+
+    try {
+      const res = await fetch(
+        `/api/sessions/${sessionId}/analyze?arm=${encodeURIComponent(selectedArm)}&throw_count=${throwCount}`,
+        { method: "POST" }
+      );
+      const data = await res.json();
+
+      if (!res.ok || data.status === "error") {
+        setSessionStatus(data.message || data.error || "Session analysis failed.", "error");
+        return;
+      }
+
+      activeSessionId = sessionId;
+      const sessionEntry = sessions.find((s) => s.id === sessionId);
+      if (sessionEntry) sessionEntry.dual_analysis = data.analysis;
+      renderSessionAnalysis(data.analysis);
+      setSessionStatus(data.cached ? "Showing cached session analysis." : "Session analyzed.", "success");
+      renderSessionList();
+    } catch (err) {
+      setSessionStatus("Request failed — check your connection and try again.", "error");
+    } finally {
+      sessionBusy = false;
+      populateSessionSelects();
+    }
+  }
+
+  sessionCreateBtn.addEventListener("click", async () => {
+    const sideId = sessionSideSelect.value;
+    const frontId = sessionFrontSelect.value;
+    if (!sideId || !frontId) { setSessionStatus("Pick both a side-view and front-view clip first.", "error"); return; }
+    if (sideId === frontId) { setSessionStatus("Side and front view must be two different clips.", "error"); return; }
+
+    sessionBusy = true;
+    sessionCreateBtn.disabled = true;
+    setSessionStatus("Creating session…", null);
+
+    try {
+      const res = await fetch("/api/sessions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ side_video_id: sideId, front_video_id: frontId }),
+      });
+      const data = await res.json();
+
+      if (!res.ok) {
+        setSessionStatus(data.error || "Couldn't create the session.", "error");
+        return;
+      }
+
+      sessions.unshift(data);
+      renderSessionList();
+      sessionBusy = false;
+      await analyzeSession(data.id);
+    } catch (err) {
+      setSessionStatus("Request failed — check your connection and try again.", "error");
+    } finally {
+      sessionBusy = false;
+      populateSessionSelects();
+    }
+  });
+
+  async function deleteSession(id) {
+    const session = sessions.find((s) => s.id === id);
+    if (!session) return;
+    if (!confirm(`Delete "${session.display_name}"? This can't be undone.`)) return;
+
+    await fetch(`/api/sessions/${id}`, { method: "DELETE" });
+    sessions = sessions.filter((s) => s.id !== id);
+    if (activeSessionId === id) clearSessionResults();
+    renderSessionList();
+    showToast("Session deleted.");
+  }
+
+  /* ------------------------------------------------------------------ *
    * Ask AI (coaching Q&A over the computed analysis)
    * ------------------------------------------------------------------ */
 
@@ -1423,4 +1696,5 @@
   clearInfoPanel();
   updateVolumeIcon();
   fetchLibrary();
+  fetchSessions();
 })();

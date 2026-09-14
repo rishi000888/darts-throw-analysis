@@ -733,6 +733,22 @@ button { font-family: inherit; cursor: pointer; }
 
 .arm-select__options { display: flex; gap: 8px; }
 
+.checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.checkbox-row input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--green);
+  cursor: pointer;
+}
+
 .chip--arm {
   flex: 1;
   text-align: center;

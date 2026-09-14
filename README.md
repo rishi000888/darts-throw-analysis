@@ -38,19 +38,34 @@ frame-accurate, slow-motion video player, plus AI pose-detection scoring.
 - **AI Throw Analysis** (`pose_analysis.py`): MediaPipe Pose (Tasks API)
   tracks the shoulder/elbow/wrist of **either arm — a Right/Left toggle sits
   above "Start Analysis"** (right-handed by default) — across every frame,
-  **auto-detects each individual throw** in the clip (peaks in wrist speed),
-  and scores each one separately: elbow stability, elbow drift direction
+  and scores each throw separately: elbow stability, elbow drift direction
   (up/down, left/right), wrist snap, release frame, and an overall score —
   each shown with a color-coded band (Excellent / Very Good / Good / Needs
-  Work). A pictograph lets you click between detected throws; a comparison
-  line shows average/best/worst/consistency across all of them. Results are
-  cached per video *and per arm* in `library.json`, so re-selecting an
-  already-analyzed throw is instant, but switching the arm toggle and
-  re-running always does a fresh pass. The scoring and throw-detection
-  formulas are a documented heuristic (see the docstring in
-  `pose_analysis.py`), not a trained biomechanical model — there's no
-  labeled dart-throw dataset to calibrate against yet, and fast repeated arm
-  motion can be over-counted as extra throws.
+  Work). **You tell it how many throws are in the clip** (a field next to
+  the arm toggle) — an earlier version tried to auto-detect this from peaks
+  in wrist speed, but the guess was inconsistent enough (over/under-counting
+  depending on camera shake, walk-up motion, throw spacing) to confuse
+  users, so it was removed; trim the clip down to one throw first
+  (see above) if you'd rather not count. A pictograph lets you click between
+  scored throws; a comparison line shows average/best/worst/consistency
+  across all of them. Results are cached per video, arm, throw count, *and*
+  whether the overlay video (below) was requested, in `library.json`, so
+  re-selecting an already-analyzed throw is instant, but changing any of
+  those or re-running always does a fresh pass. The scoring formulas are a
+  documented heuristic (see the docstring in `pose_analysis.py`), not a
+  trained biomechanical model — there's no labeled dart-throw dataset to
+  calibrate against yet.
+- **Elbow trail overlay** — an optional checkbox next to "Start Analysis"
+  ("Generate elbow trail overlay video", off by default) renders a copy of
+  the video with a line tracking the elbow's movement drawn on top,
+  re-encoded through the same bundled `imageio-ffmpeg` binary as the trim
+  feature. The trail resets at each throw's own boundary rather than
+  accumulating across the whole clip, so multiple throws' paths don't
+  overlap into one line — this needs a second, lightweight pass over the
+  video once throw windows are known (see `_render_elbow_trail_overlay` in
+  `pose_analysis.py`), so it's opt-in rather than automatic: it roughly
+  doubles total analysis time in testing. Once generated, a "Show Elbow
+  Trail Overlay" button appears to swap the player over to it.
 - **Ask AI** (`ai_coach.py`): a coaching Q&A box with two modes — **Quick
   Answers** (free, instant, keyword-matched explanations of the computed
   numbers) and **AI Chat** (a real LLM call with the analysis as context,
@@ -165,9 +180,16 @@ next time either is started. Nothing to keep in sync manually.
 ## Notes
 
 - Pose detection runs synchronously inside the `/api/analyze/<id>` request —
-  for a ~45s clip at 30fps this takes roughly a minute on CPU. There's no
-  progress bar beyond the "Analyzing…" status text; a longer clip just takes
-  longer.
+  for a ~45s clip at 30fps this takes roughly a minute on CPU. The
+  elbow-trail overlay video is opt-in (unchecked by default) for exactly
+  this reason: rendering it roughly doubles that time (measured on a real
+  45s sample clip: ~45-80s without the overlay, ~125-135s with it — machine
+  load causes real run-to-run variance, but the *with-overlay-vs-without*
+  ratio holds). There's no progress bar beyond the "Analyzing…" status
+  text; a longer clip just takes longer, more so with the overlay on.
+  Overlay rendering is best-effort — if it fails (e.g. no video codec
+  available in a deploy environment), analysis still returns normally, just
+  without an overlay video.
 - Only one arm is tracked per analysis (shoulder/elbow/wrist), picked via
   the Right/Left toggle — there's no whole-body or two-arm scoring.
 - Camera recording needs browser permission for the camera and, outside of

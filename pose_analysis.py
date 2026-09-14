@@ -34,19 +34,80 @@ formulas are a reasonable first approximation:
   spike, not a steady speed.
 - Release frame: the frame where wrist speed peaks within that throw's
   window — the wrist is fastest at the moment the dart leaves the hand.
-- Throw detection: local peaks in (smoothed) wrist speed that clear a
-  minimum height and are spaced at least ~1 second apart. This is a
-  heuristic, not a trained action-segmentation model — very fast repeat
-  throws or a very shaky camera can confuse it.
+- Throw counting is NOT automatic — an earlier version guessed how many
+  throws were in a clip from peaks in wrist speed, but the guess was
+  inconsistent (over- and under-counting depending on camera shake,
+  walk-up motion, etc.) and confused users. The caller now supplies
+  `throw_count` explicitly (how many throws are actually in the video —
+  the UI asks, or the user trims the clip to one throw first via
+  video_trim.py). This module only decides *where* each of those throws'
+  release moments falls: local peaks in (smoothed) wrist speed, tallest
+  first, at least ~1 second apart so two points within the same swing
+  can't both get picked (see `_detect_throw_peaks`).
 - Overall score (per throw): elbow and wrist weighted evenly.
+- Elbow trail overlay: `analyze_throw` can optionally render a copy of the
+  video with a line tracking the elbow's tracked position drawn on top —
+  opt-in via `overlay_output_path` (it costs real extra time: roughly
+  doubles total analysis time in testing, since the second pass over the
+  video ends up costing about as much as pose detection itself), since a
+  caller may not always want it. The trail is scoped *per throw*: it clears
+  and restarts at each throw's own window boundary rather than
+  accumulating across the whole clip, so multiple throws' paths don't
+  overlap into one continuous line. That means it can't be drawn in the
+  same pass as pose extraction — throw windows aren't known until *after*
+  the complete wrist-speed signal has been extracted and peaks picked from
+  it (see `_detect_throw_peaks`) — so overlay rendering is a second,
+  lightweight pass (`_render_elbow_trail_overlay`): raw frame reads + cv2
+  drawing using the already-extracted elbow positions, no second pose-
+  detection pass.
+
+Dual-angle analysis (`analyze_dual_angle`): a single side-on camera
+structurally can't see some things, no matter how good the tracking is —
+elbow flare/wrist-snap axis look flattened or ambiguous end-on, and
+shoulder/hip rotation isn't visible at all when the torso is edge-on to
+the lens. Rishi now optionally records a *second* clip, a front-view
+camera near the board facing back at him, for the same throw session.
+Rather than fuse the two into one 3D pose (which would need real
+calibrated multi-camera triangulation — far more than a heuristic tool
+warrants), each video is pose-detected and windowed *independently*,
+using the exact same single-angle pipeline as `analyze_throw` for the
+side video. The two are then cross-referenced only for the handful of
+metrics that genuinely need the second angle: elbow flare direction
+(front view's left/right axis, which side view can't show at all — side
+view's own left/right is really forward/back extension), wrist snap axis
+(does the wrist whip sideways during release — invisible from the side),
+and shoulder/hip torso alignment plus stance/foot consistency across
+throws (not visible from a side-on camera in any useful way). Every
+metric the side view already gets right — elbow stability, release
+timing, wrist snap magnitude, extension amount — is left untouched,
+carried straight through from the existing side-only scoring.
+
+No literal time-sync (clap, flash, timecode) between the two clips is
+needed. Each video finds its own `throw_count` release windows completely
+independently (same wrist-speed-peak method as always), and throw N in
+one video is paired with throw N in the other purely by chronological
+order — since both cameras are recording the *same* sequence of throws in
+the *same* session, "1st throw, 2nd throw, ..." already lines them up
+without needing the two clips' timestamps to agree at all. This is
+deliberately simpler than frame-level sync: nothing here compares an
+instant in one video to an instant in the other, so a few seconds of
+offset between when each camera started recording is irrelevant. The
+only thing that can go wrong is the two videos disagreeing on *how many*
+throws they found (a shaky clip, a throw one camera missed) — when that
+happens, only the throws both agree on get a combined front-view section;
+any extra throws still get their full side-only score, just without the
+front-view addition (see `angle_mismatch` in the result).
 """
 
 import base64
 import math
 import os
 import statistics
+import subprocess
 
 import cv2
+import imageio_ffmpeg
+import numpy as np
 
 try:
     import mediapipe as mp
@@ -72,7 +133,23 @@ ARM_LANDMARKS = {
     "left": {"shoulder": 11, "elbow": 13, "wrist": 15},
 }
 
+# Only read for the front-view video's dual-angle metrics (torso alignment,
+# stance/foot consistency) — the side view's own shoulder is already part of
+# ARM_LANDMARKS above. Both shoulders/hips (not just the throwing side) are
+# needed since alignment is a *relationship between* left and right, not a
+# single-point measurement.
+TORSO_LANDMARKS = {
+    "left_shoulder": 11, "right_shoulder": 12,
+    "left_hip": 23, "right_hip": 24,
+    "left_ankle": 27, "right_ankle": 28,
+    "left_foot_index": 31, "right_foot_index": 32,
+}
+
 VISIBILITY_THRESHOLD = 0.5
+# Hips/ankles are harder for MediaPipe to track cleanly than the arm (more
+# often partially out of frame or occluded by clothing/stance) — a stricter
+# threshold here would silently drop most frames instead of most outliers.
+TORSO_VISIBILITY_THRESHOLD = 0.4
 ELBOW_STABILITY_SCALE = 3.0     # degrees of wobble (post-detrend) -> percentage points lost
 MIN_VALID_FRAMES = 5            # below this, we don't trust the result
 MIN_PLAUSIBLE_ELBOW_ANGLE = 20  # degrees — a real elbow doesn't fold tighter than this mid-throw;
@@ -80,14 +157,28 @@ MIN_PLAUSIBLE_ELBOW_ANGLE = 20  # degrees — a real elbow doesn't fold tighter 
                                  # confidently (most often the arm briefly lining up with the camera's
                                  # line of sight at release, which 2D landmark math can't represent)
 
-PEAK_HEIGHT_RATIO = 0.55        # a throw's peak speed must clear this fraction of the video's fastest peak —
-                                 # raised from 0.35 because slower incidental motion (walking to the board,
-                                 # picking darts back up, resetting stance) was clearing too low a bar and
-                                 # getting counted as extra throws
-MIN_THROW_GAP_SEC = 1.2         # throws must be at least this far apart
+MIN_THROW_GAP_SEC = 1.2         # two accepted release moments must be at least this far apart — stops one
+                                 # swing's speed peak from being picked twice when throw_count allows it
 PRE_RELEASE_WINDOW_SEC = 0.8    # how far back a throw's window starts, before its release frame
 POST_RELEASE_WINDOW_SEC = 0.3   # how far past release a throw's window extends
 DIRECTION_MIN_DRIFT_PCT = 1.5   # % of frame diagonal an elbow must move to count as a real drift, not noise
+MAX_THROW_COUNT = 30            # sanity cap on the user-supplied throw_count — not a detection limit,
+                                 # just guards against a garbage/huge value turning into a very slow request
+
+# Dual-angle (front-view) metrics — see module docstring for why these are
+# separate, simple heuristics rather than any real 3D pose fusion.
+TORSO_TWIST_SQUARE_DEG = 12      # avg shoulder/hip twist at/below this -> "Square" stance banding
+TORSO_TWIST_OPEN_DEG = 25        # avg twist at/below this -> "Slightly Open"; above -> "Very Open"
+TORSO_TWIST_DRIFT_DEG = 5        # net twist change (window start -> release) below this counts as "steady"
+FOOT_CONSISTENCY_SCALE = 6.0     # % of frame diagonal of foot-centroid spread across throws -> points lost
+WRIST_SNAP_SUBWINDOW_SEC = 0.15  # how far either side of release to look for lateral wrist drift
+
+TRAIL_COLOR = (0, 210, 255)         # BGR — orange-yellow, reads clearly against most backgrounds/skin tones
+TRAIL_HEAD_COLOR = (0, 140, 255)    # BGR — slightly deeper orange for the current-frame elbow marker
+TRAIL_LINE_THICKNESS = 3
+TRAIL_POINT_RADIUS = 5
+TRAIL_MAX_GAP_SEC = 0.5         # don't draw a line segment across a tracking gap longer than this — a
+                                 # brief occlusion shouldn't be shown as the elbow teleporting
 
 
 class AnalysisError(Exception):
@@ -142,10 +233,50 @@ def _median_filter_by_frame(values_by_frame, window=3):
     return dict(zip(frames, filtered))
 
 
-def _extract_landmark_stream(video_path, arm):
-    """Single pass over the video: returns (fps, width, height,
-    elbow_angles, wrist_positions, shoulder_positions, elbow_positions,
-    total_frames)."""
+def _mux_overlay_video(raw_overlay_path, source_video_path, dest_path):
+    """Re-encode the raw elbow-trail overlay (written frame-by-frame with
+    OpenCV's VideoWriter, which only reliably supports widely-available
+    codecs like mp4v, not browser/mobile-playable H.264) into a proper
+    H.264/AAC MP4, and mux the original clip's audio back in — OpenCV's
+    frame writer only ever sees silent video frames, so without this the
+    overlay video would play back muted. Same bundled ffmpeg binary and
+    reasoning as video_trim.py's re-encode. `-map 1:a:0?` makes the audio
+    track optional so a source clip with no audio doesn't fail the whole
+    mux."""
+    ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+    cmd = [
+        ffmpeg_exe, "-y",
+        "-i", raw_overlay_path,
+        "-i", source_video_path,
+        "-map", "0:v:0", "-map", "1:a:0?",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+        "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-b:a", "128k",
+        "-shortest",
+        "-movflags", "+faststart",
+        dest_path,
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise AnalysisError(f"ffmpeg failed muxing the elbow-trail overlay: {result.stderr.strip()[-300:]}")
+
+
+def _extract_landmark_stream(video_path, arm, track_torso=False):
+    """Single pass over the video (the one expensive part — MediaPipe pose
+    detection): returns (fps, width, height, elbow_angles, wrist_positions,
+    elbow_positions, total_frames, torso_positions). Doesn't know about
+    throws or windows at all — those are only computable *after* this
+    returns, from the complete wrist-speed signal (see `analyze_throw`),
+    which is also why the elbow-trail overlay can't be drawn inline here
+    (see `_render_elbow_trail_overlay`).
+
+    `track_torso`, if True, also pulls both shoulders/hips/ankles/feet
+    (`TORSO_LANDMARKS`) out of the same per-frame MediaPipe result — no
+    second pose-detection pass, just reading more points off a result
+    that's already computed. Only the front-view video in a dual-angle
+    analysis needs this (see `analyze_dual_angle`); the side view's own
+    single-arm tracking is unaffected and this stays False for every
+    existing single-video caller."""
     landmarks = ARM_LANDMARKS[arm]
     if not MEDIAPIPE_AVAILABLE:
         raise AnalysisError(
@@ -173,6 +304,7 @@ def _extract_landmark_stream(video_path, arm):
     elbow_angles = {}      # frame_index -> angle_degrees
     wrist_pos = {}         # frame_index -> (x_px, y_px)
     elbow_pos = {}         # frame_index -> (x_px, y_px)
+    torso_pos = {}         # frame_index -> {landmark_name: (x_px, y_px)}, only if track_torso
 
     with mp_vision.PoseLandmarker.create_from_options(options) as landmarker:
         frame_index = 0
@@ -203,11 +335,112 @@ def _extract_landmark_stream(video_path, arm):
                     wrist_pos[frame_index] = wrist_px
                     elbow_pos[frame_index] = elbow_px
 
+                if track_torso:
+                    frame_torso = {}
+                    for name, idx in TORSO_LANDMARKS.items():
+                        point = lm[idx]
+                        if point.visibility >= TORSO_VISIBILITY_THRESHOLD:
+                            frame_torso[name] = (point.x * width, point.y * height)
+                    if frame_torso:
+                        torso_pos[frame_index] = frame_torso
+
             frame_index += 1
 
     cap.release()
     elbow_angles = _median_filter_by_frame(elbow_angles, window=3)
-    return fps, width, height, elbow_angles, wrist_pos, elbow_pos, frame_index
+    return fps, width, height, elbow_angles, wrist_pos, elbow_pos, frame_index, torso_pos
+
+
+def _render_elbow_trail_overlay(video_path, dest_path, elbow_pos, windows, fps, width, height):
+    """Second, MediaPipe-free pass over the video: draws a line tracking
+    the elbow's already-extracted position, confined to each individual
+    throw's own frame window (`windows` — one (start_frame, end_frame)
+    pair per scored throw, chronological, non-overlapping). The trail
+    clears and restarts at every throw boundary — entering a new window,
+    or leaving one for the gap before the next — instead of accumulating
+    across the whole clip, so multiple throws' paths never overlap into
+    one continuous line, and frames between throws (walking back to the
+    line, resetting stance) show no trail at all.
+
+    Only reads raw frames (`cv2.VideoCapture` + `cv2.imread`-style draw
+    calls) — no pose detection here, `elbow_pos` was already extracted by
+    `_extract_landmark_stream`. Returns True if the overlay video was
+    written successfully, False otherwise (best-effort: a codec/ffmpeg
+    problem here shouldn't undo the throw scoring, which has already
+    succeeded by the time this runs)."""
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        return False
+
+    raw_overlay_path = dest_path + ".raw.mp4"
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    writer = cv2.VideoWriter(raw_overlay_path, fourcc, fps, (width, height))
+    if not writer.isOpened():
+        cap.release()
+        return False
+
+    max_trail_gap_frames = max(1, int(fps * TRAIL_MAX_GAP_SEC))
+    trail_canvas = np.zeros((height, width, 3), dtype=np.uint8)
+    last_trail_point = None  # (frame_index, x_px, y_px)
+    current_window = None
+    window_idx = 0
+
+    frame_index = 0
+    while True:
+        ok, frame = cap.read()
+        if not ok:
+            break
+
+        # advance past any windows already fully behind this frame
+        while window_idx < len(windows) and frame_index > windows[window_idx][1]:
+            window_idx += 1
+        new_window = None
+        if window_idx < len(windows) and windows[window_idx][0] <= frame_index <= windows[window_idx][1]:
+            new_window = windows[window_idx]
+        if new_window != current_window:
+            # crossing a throw boundary either way (into a window, out of one
+            # into the gap, or into the next window entirely) — reset the trail
+            trail_canvas[:] = 0
+            last_trail_point = None
+            current_window = new_window
+
+        overlay_frame = frame
+        if current_window is not None:
+            elbow_here = elbow_pos.get(frame_index)
+            if elbow_here is not None:
+                x, y = int(elbow_here[0]), int(elbow_here[1])
+                if (last_trail_point is not None and
+                        frame_index - last_trail_point[0] <= max_trail_gap_frames):
+                    cv2.line(trail_canvas, (last_trail_point[1], last_trail_point[2]), (x, y),
+                             TRAIL_COLOR, TRAIL_LINE_THICKNESS, lineType=cv2.LINE_AA)
+                last_trail_point = (frame_index, x, y)
+
+            trail_mask = trail_canvas.any(axis=2)
+            if trail_mask.any():
+                overlay_frame = frame.copy()
+                overlay_frame[trail_mask] = trail_canvas[trail_mask]
+            if elbow_here is not None:
+                if overlay_frame is frame:
+                    overlay_frame = frame.copy()
+                cv2.circle(overlay_frame, (int(elbow_here[0]), int(elbow_here[1])),
+                           TRAIL_POINT_RADIUS, TRAIL_HEAD_COLOR, -1, lineType=cv2.LINE_AA)
+
+        writer.write(overlay_frame)
+        frame_index += 1
+
+    cap.release()
+    writer.release()
+
+    success = False
+    try:
+        _mux_overlay_video(raw_overlay_path, video_path, dest_path)
+        success = True
+    except AnalysisError:
+        pass  # overlay is a bonus visual — a failed mux shouldn't fail the whole analysis
+    finally:
+        if os.path.exists(raw_overlay_path):
+            os.remove(raw_overlay_path)
+    return success
 
 
 def extract_frame_images(video_path, frame_indices, max_dim=768, jpeg_quality=80):
@@ -270,34 +503,52 @@ def _smooth(speeds, window=3):
     return [(speeds[i][0], smoothed[i]) for i in range(len(speeds))]
 
 
-def _detect_throw_peaks(speeds_smoothed, fps):
-    """Greedy non-max-suppression peak picking: tallest peaks first, skip
-    any candidate too close to an already-accepted peak."""
+def _detect_throw_peaks(speeds_smoothed, fps, throw_count):
+    """Pick exactly `throw_count` release moments — the user-supplied
+    number of throws in the clip (see module docstring: automatic throw
+    *counting* was removed, so this function no longer decides how many
+    throws there are, only where each one's release moment falls).
+
+    Greedy non-max-suppression: local maxima in the smoothed wrist-speed
+    signal, tallest first, each at least MIN_THROW_GAP_SEC away from an
+    already-accepted one so two points within the same swing can't both
+    get picked. If the clip doesn't have `throw_count` distinct local
+    maxima spaced that far apart (a very short or unusually noisy clip),
+    remaining slots are filled from the single highest points left,
+    honoring the same spacing rule — so this can return fewer than
+    `throw_count` throws if even that's impossible, but never guesses at
+    a *different* count than what was asked for."""
     if not speeds_smoothed:
         return []
-
-    global_max = max(v for _, v in speeds_smoothed)
-    if global_max <= 0:
-        return []
-    threshold = global_max * PEAK_HEIGHT_RATIO
     min_gap_frames = max(1, int(fps * MIN_THROW_GAP_SEC))
 
+    def is_far_enough(frame, accepted):
+        return all(abs(frame - af) >= min_gap_frames for af, _ in accepted)
+
+    def greedy_pick(candidates, accepted):
+        accepted_frames = {f for f, _ in accepted}
+        for frame, value in sorted(candidates, key=lambda c: c[1], reverse=True):
+            if len(accepted) >= throw_count:
+                break
+            if frame in accepted_frames:
+                continue
+            if is_far_enough(frame, accepted):
+                accepted.append((frame, value))
+                accepted_frames.add(frame)
+        return accepted
+
     # local maxima: higher than both immediate neighbors (or an edge point)
-    candidates = []
+    local_maxima = []
     for i in range(len(speeds_smoothed)):
         frame, value = speeds_smoothed[i]
-        if value < threshold:
-            continue
         prev_v = speeds_smoothed[i - 1][1] if i > 0 else -1
         next_v = speeds_smoothed[i + 1][1] if i < len(speeds_smoothed) - 1 else -1
         if value >= prev_v and value >= next_v:
-            candidates.append((frame, value))
+            local_maxima.append((frame, value))
 
-    candidates.sort(key=lambda c: c[1], reverse=True)
-    accepted = []
-    for frame, value in candidates:
-        if all(abs(frame - af) >= min_gap_frames for af, _ in accepted):
-            accepted.append((frame, value))
+    accepted = greedy_pick(local_maxima, [])
+    if len(accepted) < throw_count:
+        accepted = greedy_pick(speeds_smoothed, accepted)
 
     accepted.sort(key=lambda c: c[0])
     return accepted
@@ -420,21 +671,53 @@ def _score_throw(window_start, window_end, release_frame, fps, diagonal,
     }
 
 
-def analyze_throw(video_path, arm="right"):
+def analyze_throw(video_path, arm="right", throw_count=None, overlay_output_path=None):
     """Run pose detection over the video and return a multi-throw analysis.
 
     `arm` is "right" or "left" — which arm to track (Version 2 only tracks
     one arm per analysis, picked by the caller since a throw could be
     either-handed).
 
-    Raises AnalysisError if MediaPipe isn't installed, `arm` is invalid, or
-    too few frames had a confidently-detected arm to compute anything
-    meaningful.
+    `throw_count` is required — how many throws are actually in this video.
+    Automatic throw counting used to guess this from wrist-speed peaks, but
+    the guess was inconsistent (over/under-counting depending on camera
+    shake, walk-up motion, throw spacing) and confused users, so it was
+    removed; the caller must know or ask (or trim the clip to one throw
+    first — see video_trim.py). This function still uses wrist-speed peaks
+    to find *where* each of those `throw_count` throws is, just not to
+    decide how many there are.
+
+    `overlay_output_path`, if given, is where a copy of the video gets
+    rendered with a line tracking the elbow's movement drawn on top,
+    separately per throw (see module docstring and
+    `_render_elbow_trail_overlay`) — this is opt-in because it costs real
+    extra time on top of pose detection itself, so pass it only when the
+    caller actually wants the overlay. Best-effort: if rendering fails,
+    analysis still succeeds without an overlay video.
+
+    Raises AnalysisError if MediaPipe isn't installed, `arm` or
+    `throw_count` is invalid, or too few frames had a confidently-detected
+    arm to compute anything meaningful.
     """
     if arm not in ARM_LANDMARKS:
         raise AnalysisError(f"Invalid arm '{arm}' — must be 'left' or 'right'.")
 
-    fps, width, height, elbow_angles, wrist_pos, elbow_pos, total_frames = \
+    if throw_count is None:
+        raise AnalysisError(
+            "How many throws are in this video? Automatic throw counting was "
+            "removed because it was unreliable — enter the number of throws "
+            "(or trim the clip down to one throw first) and try again."
+        )
+    try:
+        throw_count = int(throw_count)
+    except (TypeError, ValueError):
+        raise AnalysisError("throw_count must be a whole number.")
+    if throw_count < 1:
+        raise AnalysisError("throw_count must be at least 1.")
+    if throw_count > MAX_THROW_COUNT:
+        raise AnalysisError(f"throw_count can't be more than {MAX_THROW_COUNT} for a single video.")
+
+    fps, width, height, elbow_angles, wrist_pos, elbow_pos, total_frames, _torso_pos = \
         _extract_landmark_stream(video_path, arm)
     diagonal = math.hypot(width, height)
 
@@ -450,7 +733,7 @@ def analyze_throw(video_path, arm="right"):
 
     overall_mean_speed = statistics.mean(s for _, s in all_speeds)
     smoothed = _smooth(all_speeds, window=3)
-    peaks = _detect_throw_peaks(smoothed, fps)
+    peaks = _detect_throw_peaks(smoothed, fps, throw_count)
 
     if not peaks:
         # Fall back to the single fastest moment as one throw, rather than failing outright.
@@ -477,6 +760,16 @@ def analyze_throw(video_path, arm="right"):
     if not throws:
         raise AnalysisError("Detected motion but couldn't score any individual throw reliably.")
 
+    overlay_video_available = False
+    if overlay_output_path:
+        # Throw windows only exist now, after peaks were picked from the
+        # complete wrist-speed signal — see _render_elbow_trail_overlay's
+        # docstring for why this has to be a second pass.
+        windows = [(t["window_start_frame"], t["window_end_frame"]) for t in throws]
+        overlay_video_available = _render_elbow_trail_overlay(
+            video_path, overlay_output_path, elbow_pos, windows, fps, width, height
+        )
+
     overall_scores = [t["overall"]["score"] for t in throws]
     best_idx = max(range(len(throws)), key=lambda i: overall_scores[i])
     worst_idx = min(range(len(throws)), key=lambda i: overall_scores[i])
@@ -487,6 +780,7 @@ def analyze_throw(video_path, arm="right"):
     return {
         "arm": arm,
         "throw_count": len(throws),
+        "throw_count_requested": throw_count,
         "throws": throws,
         "comparison": {
             "average_score": avg_score,
@@ -498,4 +792,303 @@ def analyze_throw(video_path, arm="right"):
         },
         "frames_analyzed": total_frames,
         "frames_with_pose": len(wrist_pos),
+        "overlay_video_available": overlay_video_available,
     }
+
+
+# --------------------------------------------------------------------------
+# Dual-angle analysis — cross-referencing a second, front-view video against
+# the side view for the handful of metrics a side-on camera can't see (see
+# module docstring for the full rationale and why no time-sync is needed).
+# --------------------------------------------------------------------------
+
+def _line_angle_deg(p_a, p_b):
+    """Angle of the line through two points, in degrees, screen space."""
+    return math.degrees(math.atan2(p_b[1] - p_a[1], p_b[0] - p_a[0]))
+
+
+def _shoulder_hip_twist(frame_torso):
+    """How rotated the hips are relative to the shoulders in this frame, in
+    degrees — 0 means the shoulder-line and hip-line point the same way on
+    screen (a square, face-on stance), larger means the torso is twisted.
+    Only meaningful from a front-on camera: viewed from the side, both
+    lines project onto nearly the same point and any real twist is
+    invisible, which is exactly why this is a front-view-only metric (see
+    module docstring)."""
+    ls, rs = frame_torso.get("left_shoulder"), frame_torso.get("right_shoulder")
+    lh, rh = frame_torso.get("left_hip"), frame_torso.get("right_hip")
+    if not (ls and rs and lh and rh):
+        return None
+    diff = abs(_line_angle_deg(ls, rs) - _line_angle_deg(lh, rh)) % 180
+    return min(diff, 180 - diff)
+
+
+def _torso_label(avg_twist):
+    if avg_twist <= TORSO_TWIST_SQUARE_DEG:
+        return "Square"
+    if avg_twist <= TORSO_TWIST_OPEN_DEG:
+        return "Slightly Open"
+    return "Very Open"
+
+
+def _torso_alignment(window_torso, release_frame):
+    """Average/range of shoulder-hip twist across a throw's front-view
+    window, plus how much it changed from the start of the window to
+    release — e.g. a thrower who starts square but rotates open through
+    the release shows a positive net_change_deg."""
+    twists = {}
+    for frame, values in window_torso.items():
+        twist = _shoulder_hip_twist(values)
+        if twist is not None:
+            twists[frame] = twist
+    if len(twists) < 3:
+        return None
+
+    values = list(twists.values())
+    avg_twist = statistics.mean(values)
+    start_frame = min(twists)
+    release_nearest = min(twists, key=lambda f: abs(f - release_frame))
+    net_change = round(twists[release_nearest] - twists[start_frame], 1)
+    label = _torso_label(avg_twist)
+
+    if net_change > TORSO_TWIST_DRIFT_DEG:
+        drift_note = "opened up further as the throw progressed"
+    elif net_change < -TORSO_TWIST_DRIFT_DEG:
+        drift_note = "squared up more by release"
+    else:
+        drift_note = "held a steady rotation through the throw"
+
+    return {
+        "twist_avg_deg": round(avg_twist, 1),
+        "twist_min_deg": round(min(values), 1),
+        "twist_max_deg": round(max(values), 1),
+        "net_change_deg": net_change,
+        "label": label,
+        "summary": (
+            f"Shoulders/hips were {label.lower()} on average "
+            f"({round(avg_twist, 1)} degrees of twist) — {drift_note}."
+        ),
+    }
+
+
+def _wrist_lateral_snap(window_wrist_pos, release_frame, fps, diagonal):
+    """How much the wrist drifts left/right (on screen, front view) in the
+    short window right around release — a real sideways whip ("casting")
+    during the snap, versus a straight release. This is genuinely
+    invisible from a side-on camera, where left/right on screen is really
+    forward/back extension, not a lateral axis at all (see module
+    docstring)."""
+    if not window_wrist_pos:
+        return None
+    sub_frames_window = int(fps * WRIST_SNAP_SUBWINDOW_SEC)
+    sub_frames = [f for f in window_wrist_pos if abs(f - release_frame) <= sub_frames_window]
+    if len(sub_frames) < 2:
+        sub_frames = list(window_wrist_pos.keys())
+    xs = [window_wrist_pos[f][0] for f in sub_frames]
+    lateral_range_pct = (max(xs) - min(xs)) / diagonal * 100
+
+    if lateral_range_pct <= DIRECTION_MIN_DRIFT_PCT:
+        label = "Straight"
+        summary = "Wrist snapped straight through release, no visible sideways whip from the front."
+    else:
+        label = "Lateral Drift"
+        summary = (
+            f"Wrist drifted sideways during the snap (about {round(lateral_range_pct, 1)}% of frame "
+            "width) — a lateral whip the side view alone can't show."
+        )
+
+    return {"lateral_range_pct": round(lateral_range_pct, 1), "label": label, "summary": summary}
+
+
+def _foot_centroid(frame_torso):
+    """Rough foot position for one frame — mean of whichever ankle/foot
+    landmarks were visible. Used to compare stance placement *between*
+    throws in the same front-view video (the camera doesn't move between
+    throws in one recording, so raw pixel spread already reflects how
+    consistently the feet land in the same spot)."""
+    points = [frame_torso[name] for name in
+              ("left_ankle", "right_ankle", "left_foot_index", "right_foot_index")
+              if name in frame_torso]
+    if not points:
+        return None
+    return (statistics.mean(p[0] for p in points), statistics.mean(p[1] for p in points))
+
+
+def _stance_consistency(foot_centroids, diagonal):
+    """Session-level score: how consistently the feet land in the same
+    spot throw-to-throw, front view only — a side-on camera only shows one
+    foot's silhouette in front of/behind the other and can't measure this
+    at all. Same normalize-by-diagonal, subtract-from-100 pattern as the
+    per-video `comparison.consistency_score`."""
+    points = [c for c in foot_centroids if c is not None]
+    if len(points) < 2:
+        return None
+
+    mean_x = statistics.mean(p[0] for p in points)
+    mean_y = statistics.mean(p[1] for p in points)
+    spreads_pct = [math.hypot(x - mean_x, y - mean_y) / diagonal * 100 for x, y in points]
+    avg_spread_pct = statistics.mean(spreads_pct)
+    score = round(_clamp(100 - avg_spread_pct * FOOT_CONSISTENCY_SCALE))
+    label = _score_band(score)
+
+    return {
+        "score": score,
+        "label": label,
+        "avg_spread_pct": round(avg_spread_pct, 1),
+        "summary": (
+            f"Foot placement varied by about {round(avg_spread_pct, 1)}% of the frame between "
+            f"throws ({label.lower()} stance consistency)."
+        ),
+    }
+
+
+def _score_front_view(window_start, window_end, release_frame, fps, diagonal,
+                       elbow_pos, wrist_pos, torso_pos):
+    """Front-view-only metrics for one throw's window: elbow flare
+    direction (reusing `_direction_label`, same function the side view
+    uses for its own up/down + forward/back drift — here it's measuring a
+    different, genuinely new axis), wrist lateral snap, and torso
+    alignment. Returns (front_section_dict, foot_centroid_at_release)."""
+    elbow_frames = sorted(f for f in elbow_pos if window_start <= f <= window_end)
+    elbow_flare = None
+    if elbow_frames:
+        start_f = elbow_frames[0]
+        end_f = min(elbow_frames, key=lambda f: abs(f - release_frame))
+        x0, y0 = elbow_pos[start_f]
+        x1, y1 = elbow_pos[end_f]
+        elbow_flare = _direction_label(x1 - x0, y1 - y0, diagonal)
+
+    window_wrist = {f: p for f, p in wrist_pos.items() if window_start <= f <= window_end}
+    wrist_snap = _wrist_lateral_snap(window_wrist, release_frame, fps, diagonal) if window_wrist else None
+
+    window_torso = {f: torso_pos[f] for f in torso_pos if window_start <= f <= window_end}
+    torso_alignment = _torso_alignment(window_torso, release_frame)
+
+    foot_centroid = None
+    torso_frames_in_window = sorted(window_torso.keys())
+    if torso_frames_in_window:
+        release_nearest = min(torso_frames_in_window, key=lambda f: abs(f - release_frame))
+        foot_centroid = _foot_centroid(torso_pos[release_nearest])
+
+    front_section = {
+        "elbow_flare_direction": elbow_flare,
+        "wrist_lateral_snap": wrist_snap,
+        "torso_alignment": torso_alignment,
+    }
+    return front_section, foot_centroid
+
+
+def _combine_throw_notes(side_throw, front_section):
+    """Plain-language cross-reference between the two angles for one throw
+    — only for the metrics that genuinely need both (see module
+    docstring). Everything else in `side_throw` (elbow stability, wrist
+    snap magnitude, release timing, overall score) is left exactly as the
+    side-only pipeline computed it and isn't repeated here."""
+    notes = {}
+
+    side_direction = (side_throw.get("elbow") or {}).get("direction")
+    front_direction = front_section.get("elbow_flare_direction")
+    if side_direction and front_direction:
+        notes["elbow"] = (
+            f"Side view: {side_direction['summary']} "
+            f"Front view: {front_direction['summary']}"
+        )
+    elif front_direction:
+        notes["elbow"] = f"Front view: {front_direction['summary']}"
+
+    wrist_snap = front_section.get("wrist_lateral_snap")
+    if wrist_snap:
+        notes["wrist"] = wrist_snap["summary"]
+
+    torso = front_section.get("torso_alignment")
+    if torso:
+        notes["torso"] = torso["summary"]
+
+    return notes
+
+
+def analyze_dual_angle(side_video_path, front_video_path, arm="right", throw_count=None,
+                        overlay_output_path=None):
+    """Run the full single-angle pipeline on the side video (unchanged,
+    exactly as accurate as `analyze_throw` already is), then add a
+    front-view video's own independent throw detection, cross-referenced
+    only for the metrics a side-on camera can't give (see module
+    docstring). Same `arm`/`throw_count` apply to both videos — they're two
+    cameras on the same throw session, so the same arm is thrown and the
+    same number of throws should appear in both.
+
+    Raises the same `AnalysisError`s as `analyze_throw` for the side video
+    (invalid arm/throw_count, too little tracked motion, etc. — validated
+    once, since both videos share the same params), plus an analogous
+    error if the front video itself doesn't have enough usable pose data.
+    """
+    side_analysis = analyze_throw(side_video_path, arm=arm, throw_count=throw_count,
+                                   overlay_output_path=overlay_output_path)
+    # analyze_throw already validated arm/throw_count above — safe to reuse
+    # the coerced int from here on rather than re-validating.
+    throw_count = int(throw_count)
+
+    fps_f, width_f, height_f, elbow_angles_f, wrist_pos_f, elbow_pos_f, total_frames_f, torso_pos_f = \
+        _extract_landmark_stream(front_video_path, arm, track_torso=True)
+    diagonal_f = math.hypot(width_f, height_f)
+
+    if len(elbow_angles_f) < MIN_VALID_FRAMES or len(wrist_pos_f) < MIN_VALID_FRAMES:
+        raise AnalysisError(
+            f"Couldn't reliably detect a {arm} arm in the front-view video — try a clearer, "
+            "well-lit clip with your whole body in frame, facing the camera."
+        )
+
+    all_speeds_f = _wrist_speed_series(wrist_pos_f, fps_f, diagonal_f)
+    if not all_speeds_f:
+        raise AnalysisError("Not enough wrist motion detected in the front-view video to analyze the throw.")
+
+    smoothed_f = _smooth(all_speeds_f, window=3)
+    peaks_f = _detect_throw_peaks(smoothed_f, fps_f, throw_count)
+    if not peaks_f:
+        peaks_f = [max(all_speeds_f, key=lambda s: s[1])]
+
+    pre_frames_f = int(fps_f * PRE_RELEASE_WINDOW_SEC)
+    post_frames_f = int(fps_f * POST_RELEASE_WINDOW_SEC)
+
+    front_windows = []
+    for i, (release_frame, _peak_val) in enumerate(peaks_f):
+        window_start = max(0, release_frame - pre_frames_f)
+        if i > 0:
+            window_start = max(window_start, peaks_f[i - 1][0] + 1)
+        window_end = min(total_frames_f - 1, release_frame + post_frames_f)
+        front_windows.append((window_start, window_end, release_frame))
+
+    # Pairing by chronological order, not by time — see module docstring
+    # for why no literal sync between the two clips is needed.
+    side_throws = side_analysis["throws"]
+    pair_count = min(len(side_throws), len(front_windows))
+
+    combined_throws = []
+    foot_centroids = []
+    for i, side_throw in enumerate(side_throws):
+        throw = dict(side_throw)
+        if i < pair_count:
+            fw_start, fw_end, fw_release = front_windows[i]
+            front_section, foot_centroid = _score_front_view(
+                fw_start, fw_end, fw_release, fps_f, diagonal_f,
+                elbow_pos_f, wrist_pos_f, torso_pos_f,
+            )
+            throw["front_view"] = front_section
+            throw["combined"] = _combine_throw_notes(side_throw, front_section)
+            foot_centroids.append(foot_centroid)
+        else:
+            throw["front_view"] = None
+            throw["combined"] = None
+        combined_throws.append(throw)
+
+    stance_consistency = _stance_consistency(foot_centroids, diagonal_f)
+
+    result = dict(side_analysis)
+    result["throws"] = combined_throws
+    result["dual_angle"] = True
+    result["front_view_throw_count"] = len(front_windows)
+    result["angle_mismatch"] = len(side_throws) != len(front_windows)
+    result["stance_consistency"] = stance_consistency
+    result["frames_analyzed_front"] = total_frames_f
+    result["frames_with_pose_front"] = len(wrist_pos_f)
+    return result

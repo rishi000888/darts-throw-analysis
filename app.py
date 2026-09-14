@@ -40,10 +40,16 @@ BASE_DIR = os.path.abspath(os.path.dirname(__file__))
 UPLOAD_DIR = os.path.join(BASE_DIR, "static", "uploads", "videos")
 THUMB_DIR = os.path.join(BASE_DIR, "static", "uploads", "thumbnails")
 LIBRARY_FILE = os.path.join(BASE_DIR, "static", "uploads", "library.json")
+# Two-angle sessions (see "API: two-angle sessions" below) just pair two
+# already-uploaded library entries together — no new video-storage concept,
+# so this is its own tiny JSON file rather than teaching library.json about
+# a second kind of record.
+SESSIONS_FILE = os.path.join(BASE_DIR, "static", "uploads", "sessions.json")
 
 ALLOWED_EXTENSIONS = {"mp4", "mov", "avi", "webm"}
 VALID_ARMS = {"left", "right"}
 MAX_VIDEOS = 20
+MAX_SESSIONS = 20  # same sanity-cap rationale as MAX_VIDEOS — sessions.json stays tiny either way
 MAX_CONTENT_LENGTH = 2000 * 1024 * 1024  # 2 GB total request cap (scaled with MAX_VIDEOS)
 
 # Cloud Run enforces a hard ~32MB limit on request bodies, which the direct
@@ -111,6 +117,21 @@ def _load_library():
 
 def _save_library(entries):
     with open(LIBRARY_FILE, "w") as f:
+        json.dump(entries, f, indent=2)
+
+
+def _load_sessions():
+    if not os.path.exists(SESSIONS_FILE):
+        return []
+    with open(SESSIONS_FILE, "r") as f:
+        try:
+            return json.load(f)
+        except json.JSONDecodeError:
+            return []
+
+
+def _save_sessions(entries):
+    with open(SESSIONS_FILE, "w") as f:
         json.dump(entries, f, indent=2)
 
 
@@ -465,10 +486,193 @@ def delete_video(video_id):
 
 
 # --------------------------------------------------------------------------
+# API: two-angle sessions — pairs a side-view video with a front-view video
+# already sitting in the normal library (uploaded through the exact same
+# /api/upload / /api/upload-url flow above, no changes there) so
+# pose_analysis.analyze_dual_angle can cross-reference the two. Kept as its
+# own tiny record rather than folding into a library entry, since a video
+# can be reused across sessions (e.g. re-paired after a mistaken upload)
+# without duplicating it.
+# --------------------------------------------------------------------------
+
+def _video_summary(entry):
+    """Small, list/UI-friendly slice of a library entry — enough for the
+    mobile app to show a thumbnail/name for each side of a session without
+    a second round trip per video."""
+    if entry is None:
+        return None
+    return {
+        "id": entry["id"],
+        "display_name": entry["display_name"],
+        "video_url": entry["video_url"],
+        "thumbnail_url": entry["thumbnail_url"],
+        "duration": entry.get("duration"),
+    }
+
+
+def _enrich_session(session, library_by_id):
+    """Attach current video summaries (name/thumbnail can change — rename —
+    after a session was created) rather than freezing them at creation
+    time."""
+    enriched = dict(session)
+    enriched["side_video"] = _video_summary(library_by_id.get(session["side_video_id"]))
+    enriched["front_video"] = _video_summary(library_by_id.get(session["front_video_id"]))
+    return enriched
+
+
+@app.route("/api/sessions", methods=["GET"])
+def list_sessions():
+    library_by_id = {e["id"]: e for e in _load_library()}
+    sessions = _load_sessions()
+    return jsonify([_enrich_session(s, library_by_id) for s in sessions])
+
+
+@app.route("/api/sessions", methods=["POST"])
+def create_session():
+    sessions = _load_sessions()
+    if len(sessions) >= MAX_SESSIONS:
+        return jsonify({"error": f"You already have the maximum of {MAX_SESSIONS} sessions."}), 400
+
+    data = request.get_json(silent=True) or {}
+    side_video_id = data.get("side_video_id")
+    front_video_id = data.get("front_video_id")
+    if not side_video_id or not front_video_id:
+        return jsonify({"error": "side_video_id and front_video_id are both required."}), 400
+    if side_video_id == front_video_id:
+        return jsonify({"error": "Side and front videos must be two different clips."}), 400
+
+    library = _load_library()
+    library_by_id = {e["id"]: e for e in library}
+    if side_video_id not in library_by_id:
+        return jsonify({"error": "side_video_id not found in your library."}), 404
+    if front_video_id not in library_by_id:
+        return jsonify({"error": "front_video_id not found in your library."}), 404
+
+    display_name = (data.get("display_name") or "").strip() or (
+        f"{library_by_id[side_video_id]['display_name']} (two-angle)"
+    )
+
+    session = {
+        "id": uuid.uuid4().hex[:12],
+        "display_name": display_name,
+        "side_video_id": side_video_id,
+        "front_video_id": front_video_id,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "dual_analysis": None,
+    }
+    sessions.append(session)
+    _save_sessions(sessions)
+
+    return jsonify(_enrich_session(session, library_by_id)), 201
+
+
+@app.route("/api/sessions/<session_id>", methods=["GET"])
+def get_session(session_id):
+    library_by_id = {e["id"]: e for e in _load_library()}
+    sessions = _load_sessions()
+    session = next((s for s in sessions if s["id"] == session_id), None)
+    if session is None:
+        return jsonify({"error": "Session not found."}), 404
+    return jsonify(_enrich_session(session, library_by_id))
+
+
+@app.route("/api/sessions/<session_id>", methods=["DELETE"])
+def delete_session(session_id):
+    sessions = _load_sessions()
+    if not any(s["id"] == session_id for s in sessions):
+        return jsonify({"error": "Session not found."}), 404
+    sessions = [s for s in sessions if s["id"] != session_id]
+    _save_sessions(sessions)
+    return jsonify({"deleted": session_id})
+
+
+@app.route("/api/sessions/<session_id>/analyze", methods=["POST"])
+def analyze_session(session_id):
+    """Same shape/params as /api/analyze/<video_id> below — arm and
+    throw_count are required for the same reason (auto throw-counting was
+    removed, see pose_analysis.py) — but runs pose_analysis.analyze_dual_angle
+    over both of the session's videos and caches the merged result onto the
+    session record instead of a single library entry."""
+    library = _load_library()
+    library_by_id = {e["id"]: e for e in library}
+    sessions = _load_sessions()
+    session = next((s for s in sessions if s["id"] == session_id), None)
+    if session is None:
+        return jsonify({"error": "Session not found."}), 404
+
+    side_entry = library_by_id.get(session["side_video_id"])
+    front_entry = library_by_id.get(session["front_video_id"])
+    if side_entry is None or front_entry is None:
+        return jsonify({"error": "One of this session's videos no longer exists in your library."}), 404
+
+    arm = request.args.get("arm", "right")
+    if arm not in VALID_ARMS:
+        return jsonify({"error": "arm must be 'left' or 'right'."}), 400
+
+    throw_count_raw = request.args.get("throw_count")
+    if throw_count_raw is None:
+        return jsonify({
+            "error": "throw_count is required — how many throws are in this session "
+                     "(both videos should show the same number)."
+        }), 400
+    try:
+        throw_count = int(throw_count_raw)
+    except (TypeError, ValueError):
+        return jsonify({"error": "throw_count must be a whole number."}), 400
+    if throw_count < 1 or throw_count > pose_analysis.MAX_THROW_COUNT:
+        return jsonify({
+            "error": f"throw_count must be between 1 and {pose_analysis.MAX_THROW_COUNT}."
+        }), 400
+
+    force = request.args.get("force") == "1"
+    cached = session.get("dual_analysis")
+    if (cached and cached.get("throws") and cached.get("arm") == arm and
+            cached.get("throw_count_requested") == throw_count and not force):
+        return jsonify({"status": "ok", "cached": True, "analysis": cached})
+
+    side_path = os.path.join(UPLOAD_DIR, side_entry["stored_name"])
+    front_path = os.path.join(UPLOAD_DIR, front_entry["stored_name"])
+    try:
+        analysis = pose_analysis.analyze_dual_angle(
+            side_path, front_path, arm=arm, throw_count=throw_count
+        )
+    except pose_analysis.AnalysisError as err:
+        return jsonify({"status": "error", "message": str(err)}), 422
+
+    session["dual_analysis"] = analysis
+    _save_sessions(sessions)
+
+    return jsonify({"status": "ok", "cached": False, "analysis": analysis})
+
+
+# --------------------------------------------------------------------------
 # API: analysis — Version 2 (MediaPipe pose detection + throw-mechanics
 # scoring, implemented in pose_analysis.py). Results are cached onto the
 # library entry so re-selecting an already-analyzed video is instant.
+#
+# throw_count is required — pose_analysis.py used to auto-detect how many
+# throws were in a clip from wrist-speed peaks, but the guess was
+# inconsistent enough (over/under-counting) to confuse users, so it was
+# removed. The caller now must say how many throws are in the video (the
+# web/desktop and mobile UIs ask before starting analysis) — or the video
+# can be trimmed down to a single throw first via /api/videos/<id>/trim.
+#
+# overlay is opt-in (default off) — rendering the elbow-trail overlay video
+# adds real time on top of pose detection itself (measured roughly doubling
+# total analysis time on a 45s clip), so it's only generated when the
+# caller actually asks for it.
+# It's part of the cache key alongside arm/throw_count: a cached analysis
+# that was generated *without* an overlay has no video to retroactively
+# serve, so a request that now wants one has to redo the (already-completed)
+# pose detection pass to get it — see pose_analysis.py's module docstring
+# for why the overlay can't be bolted onto an existing analysis cheaply.
 # --------------------------------------------------------------------------
+
+def _parse_bool_param(raw, default=False):
+    if raw is None:
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
 
 @app.route("/api/analyze/<video_id>", methods=["POST"])
 def analyze_video(video_id):
@@ -481,21 +685,54 @@ def analyze_video(video_id):
     if arm not in VALID_ARMS:
         return jsonify({"error": "arm must be 'left' or 'right'."}), 400
 
+    throw_count_raw = request.args.get("throw_count")
+    if throw_count_raw is None:
+        return jsonify({
+            "error": "throw_count is required — automatic throw counting was "
+                     "removed. Enter how many throws are in this video."
+        }), 400
+    try:
+        throw_count = int(throw_count_raw)
+    except (TypeError, ValueError):
+        return jsonify({"error": "throw_count must be a whole number."}), 400
+    if throw_count < 1 or throw_count > pose_analysis.MAX_THROW_COUNT:
+        return jsonify({
+            "error": f"throw_count must be between 1 and {pose_analysis.MAX_THROW_COUNT}."
+        }), 400
+
+    overlay_requested = _parse_bool_param(request.args.get("overlay"), default=False)
+
     force = request.args.get("force") == "1"
     cached = entry.get("analysis")
-    if cached and cached.get("throws") and cached.get("arm") == arm and not force:
-        return jsonify({"status": "ok", "cached": True, "analysis": cached})
+    if (cached and cached.get("throws") and cached.get("arm") == arm and
+            cached.get("throw_count_requested") == throw_count and
+            cached.get("overlay_requested") == overlay_requested and not force):
+        return jsonify({
+            "status": "ok", "cached": True, "analysis": cached,
+            "overlay_video_url": entry.get("overlay_video_url") if overlay_requested else None,
+        })
 
     video_path = os.path.join(UPLOAD_DIR, entry["stored_name"])
+    overlay_path = os.path.join(UPLOAD_DIR, f"{video_id}_elbow_trail.mp4") if overlay_requested else None
     try:
-        analysis = pose_analysis.analyze_throw(video_path, arm=arm)
+        analysis = pose_analysis.analyze_throw(
+            video_path, arm=arm, throw_count=throw_count, overlay_output_path=overlay_path
+        )
     except pose_analysis.AnalysisError as err:
         return jsonify({"status": "error", "message": str(err)}), 422
 
+    analysis["overlay_requested"] = overlay_requested
     entry["analysis"] = analysis
+    if overlay_requested and analysis.get("overlay_video_available") and os.path.exists(overlay_path):
+        entry["overlay_video_url"] = f"/static/uploads/videos/{video_id}_elbow_trail.mp4"
+    else:
+        entry.pop("overlay_video_url", None)
     _save_library(library)
 
-    return jsonify({"status": "ok", "cached": False, "analysis": analysis})
+    return jsonify({
+        "status": "ok", "cached": False, "analysis": analysis,
+        "overlay_video_url": entry.get("overlay_video_url"),
+    })
 
 
 # --------------------------------------------------------------------------
@@ -601,6 +838,97 @@ def ai_analyze_video(video_id):
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
     _save_library(library)
+
+    return jsonify({"result": text, "cached": False})
+
+
+# --------------------------------------------------------------------------
+# API: Ask AI / Analyze by AI for a two-angle session — identical logic to
+# the single-video routes above, just reading the session's cached
+# `dual_analysis` instead of a library entry's `analysis`. ai_coach.py's
+# context builder only reads the fields a single-video analysis already
+# has (arm, throws[].elbow/wrist/overall, comparison) — analyze_dual_angle
+# carries all of those through unchanged and only *adds* new keys
+# (front_view, combined, stance_consistency) — so this works today, it just
+# doesn't narrate the new front-view findings yet. That's a reasonable
+# follow-up, not required for the numbers themselves to be usable.
+# --------------------------------------------------------------------------
+
+@app.route("/api/sessions/<session_id>/coach", methods=["POST"])
+def coach_session(session_id):
+    sessions = _load_sessions()
+    session = next((s for s in sessions if s["id"] == session_id), None)
+    if session is None:
+        return jsonify({"error": "Session not found."}), 404
+
+    analysis = session.get("dual_analysis")
+    if not analysis or not analysis.get("throws"):
+        return jsonify({"error": "Analyze this session before asking about it."}), 400
+
+    data = request.get_json(silent=True) or {}
+    question = data.get("question", "")
+    mode = data.get("mode", "rule")
+    provider = data.get("provider", "anthropic")
+    api_key = (data.get("api_key") or "").strip() or None
+    model = (data.get("model") or "").strip() or None
+    if mode not in ("rule", "llm"):
+        return jsonify({"error": "mode must be 'rule' or 'llm'."}), 400
+    if mode == "llm" and provider not in ai_coach.PROVIDERS:
+        return jsonify({"error": f"Unknown AI provider '{provider}'."}), 400
+
+    try:
+        answer = ai_coach.answer_question(question, analysis, mode, provider=provider, api_key=api_key, model=model)
+    except ai_coach.CoachError as err:
+        return jsonify({"error": str(err)}), 400
+
+    return jsonify({"answer": answer, "mode": mode})
+
+
+@app.route("/api/sessions/<session_id>/ai-analyze", methods=["POST"])
+def ai_analyze_session(session_id):
+    library_by_id = {e["id"]: e for e in _load_library()}
+    sessions = _load_sessions()
+    session = next((s for s in sessions if s["id"] == session_id), None)
+    if session is None:
+        return jsonify({"error": "Session not found."}), 404
+
+    analysis = session.get("dual_analysis")
+    if not analysis or not analysis.get("throws"):
+        return jsonify({"error": "Analyze this session before requesting an AI analysis."}), 400
+
+    data = request.get_json(silent=True) or {}
+    provider = data.get("provider", "anthropic")
+    api_key = (data.get("api_key") or "").strip() or None
+    model = (data.get("model") or "").strip() or None
+    force = request.args.get("force") == "1"
+
+    if provider not in ai_coach.PROVIDERS:
+        return jsonify({"error": f"Unknown AI provider '{provider}'."}), 400
+
+    cached = session.get("ai_analysis")
+    if cached and cached.get("provider") == provider and not force:
+        return jsonify({"result": cached["text"], "cached": True})
+
+    # Reference frames come from the side video only — reusing the same
+    # single-video helper is enough context for the LLM (the front video's
+    # own visuals aren't attached here, a scope-limiting tradeoff, not a bug).
+    side_entry = library_by_id.get(session["side_video_id"])
+    images = []
+    if side_entry is not None:
+        side_path = os.path.join(UPLOAD_DIR, side_entry["stored_name"])
+        images = pose_analysis.extract_frame_images(side_path, _reference_frame_indices(analysis))
+
+    try:
+        text = ai_coach.ai_analyze(analysis, provider=provider, api_key=api_key, model=model, images=images)
+    except ai_coach.CoachError as err:
+        return jsonify({"error": str(err)}), 400
+
+    session["ai_analysis"] = {
+        "provider": provider,
+        "text": text,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    _save_sessions(sessions)
 
     return jsonify({"result": text, "cached": False})
 

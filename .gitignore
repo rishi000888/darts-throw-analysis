@@ -4,6 +4,7 @@ __pycache__/
 static/uploads/videos/*
 static/uploads/thumbnails/*
 static/uploads/library.json
+static/uploads/sessions.json
 !static/uploads/videos/.gitkeep
 !static/uploads/thumbnails/.gitkeep
 models/*.task

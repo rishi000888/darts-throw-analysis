@@ -88,6 +88,8 @@
   const speedPresets = document.getElementById("speed-presets");
 
   const armSelect = document.getElementById("arm-select");
+  const throwCountInput = document.getElementById("throw-count-input");
+  const overlayCheckbox = document.getElementById("overlay-checkbox");
   const analyzeBtn = document.getElementById("analyze-btn");
   const analysisStatusPill = document.getElementById("analysis-status-pill");
   const analysisElbow = document.getElementById("analysis-elbow");
@@ -98,6 +100,7 @@
   const analysisNote = document.getElementById("analysis-note");
   const comparisonSummary = document.getElementById("comparison-summary");
   const throwPictograph = document.getElementById("throw-pictograph");
+  const overlayToggleBtn = document.getElementById("overlay-toggle-btn");
 
   const coachModeGroup = document.getElementById("coach-mode");
   const coachLog = document.getElementById("coach-log");
@@ -145,6 +148,7 @@
   let coachMode = "rule";      // "rule" | "llm"
   let coachBusy = false;
   let selectedArm = "right";   // "right" | "left" — which arm to analyze
+  let showingOverlay = false;  // whether the player is currently showing the elbow-trail overlay video
   let trimStart = null;        // seconds — marked in-point for the trim toolbar
   let trimEnd = null;          // seconds — marked out-point for the trim toolbar
   let trimBusy = false;
@@ -711,10 +715,21 @@
     const c = analysis.comparison;
     const armLabel = analysis.arm === "left" ? "left arm" : "right arm";
     comparisonSummary.hidden = false;
+
+    const shortfall = analysis.throw_count_requested && analysis.throw_count < analysis.throw_count_requested
+      ? ` (only found ${analysis.throw_count} of the ${analysis.throw_count_requested} you entered — try a clearer clip or trim closer to just the throws)`
+      : "";
     comparisonSummary.textContent = analysis.throw_count > 1
-      ? `${analysis.throw_count} throws detected (${armLabel}) — average ${c.average_score}% (${c.average_label}), ` +
+      ? `${analysis.throw_count} throws scored${shortfall} (${armLabel}) — average ${c.average_score}% (${c.average_label}), ` +
         `best #${c.best_throw_number}, consistency ${c.consistency_score}% (${c.consistency_label}).`
-      : `1 throw detected in this clip (${armLabel}).`;
+      : `1 throw scored in this clip${shortfall} (${armLabel}).`;
+
+    if (throwCountInput && analysis.throw_count_requested) {
+      throwCountInput.value = analysis.throw_count_requested;
+    }
+    if (overlayCheckbox && typeof analysis.overlay_requested === "boolean") {
+      overlayCheckbox.checked = analysis.overlay_requested;
+    }
 
     renderPictograph(analysis);
 
@@ -723,6 +738,30 @@
 
     analysisNote.textContent = `Based on ${analysis.frames_with_pose} tracked frames across ${analysis.throw_count} throw(s).`;
   }
+
+  function updateOverlayToggle(video) {
+    showingOverlay = false;
+    if (video && video.overlay_video_url) {
+      overlayToggleBtn.hidden = false;
+      overlayToggleBtn.textContent = "Show Elbow Trail Overlay";
+    } else {
+      overlayToggleBtn.hidden = true;
+    }
+  }
+
+  overlayToggleBtn.addEventListener("click", () => {
+    const video = activeVideo();
+    if (!video || !video.overlay_video_url) return;
+    const wasPlaying = !videoEl.paused;
+    const time = videoEl.currentTime;
+    showingOverlay = !showingOverlay;
+    videoEl.src = showingOverlay ? video.overlay_video_url : video.video_url;
+    overlayToggleBtn.textContent = showingOverlay ? "Show Original Video" : "Show Elbow Trail Overlay";
+    videoEl.addEventListener("loadedmetadata", () => {
+      videoEl.currentTime = time;
+      if (wasPlaying) videoEl.play();
+    }, { once: true });
+  });
 
   function loadVideo(id) {
     const video = library.find((v) => v.id === id);
@@ -744,11 +783,14 @@
     updateTimelineUI(0);
 
     resetCoachLog();
+    updateOverlayToggle(video);
     if (video.analysis) {
       setSelectedArm(video.analysis.arm);
       renderAnalysis(video.analysis);
     } else {
       setSelectedArm("right");
+      if (throwCountInput) throwCountInput.value = 1;
+      if (overlayCheckbox) overlayCheckbox.checked = false;
       clearAnalysisPanel();
     }
 
@@ -942,29 +984,52 @@
       showToast("Select a throw first.");
       return;
     }
+
+    const throwCount = parseInt(throwCountInput ? throwCountInput.value : "1", 10);
+    if (!Number.isInteger(throwCount) || throwCount < 1) {
+      showToast("Enter how many throws are in this clip (1 or more) first.");
+      if (throwCountInput) throwCountInput.focus();
+      return;
+    }
+
     const targetId = activeVideoId;
     const arm = selectedArm;
+    const overlay = overlayCheckbox ? overlayCheckbox.checked : false;
     analyzeBtn.disabled = true;
     analysisStatusPill.textContent = "Analyzing…";
     analysisStatusPill.className = "pill pill--soon";
-    analysisNote.textContent = "Running AI pose detection — this can take a little while for longer clips.";
+    analysisNote.textContent = overlay
+      ? "Running AI pose detection and rendering the elbow trail overlay — this takes noticeably longer than scoring alone."
+      : "Running AI pose detection — this can take a little while for longer clips.";
 
     try {
-      const res = await fetch(`/api/analyze/${targetId}?arm=${encodeURIComponent(arm)}`, { method: "POST" });
+      const res = await fetch(
+        `/api/analyze/${targetId}?arm=${encodeURIComponent(arm)}&throw_count=${throwCount}&overlay=${overlay}`,
+        { method: "POST" }
+      );
       const data = await res.json();
 
       if (!res.ok || data.status === "error") {
-        analysisNote.textContent = data.message || "Analysis failed. Try a clearer video.";
+        analysisNote.textContent = data.message || data.error || "Analysis failed. Try a clearer video.";
         analysisStatusPill.textContent = "Failed";
         analysisStatusPill.className = "pill";
-        showToast(data.message || "Analysis failed.");
+        showToast(data.message || data.error || "Analysis failed.");
         return;
       }
 
       const entry = library.find((v) => v.id === targetId);
-      if (entry) entry.analysis = data.analysis;
+      if (entry) {
+        entry.analysis = data.analysis;
+        entry.overlay_video_url = data.overlay_video_url || null;
+      }
 
-      if (targetId === activeVideoId) renderAnalysis(data.analysis);
+      if (targetId === activeVideoId) {
+        renderAnalysis(data.analysis);
+        if (entry) {
+          updateOverlayToggle(entry);
+          videoEl.src = entry.video_url;
+        }
+      }
       showToast(data.cached ? "Showing cached analysis." : "Analysis complete.");
     } catch (err) {
       analysisNote.textContent = "Analysis failed — check your connection and try again.";

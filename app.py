@@ -31,6 +31,7 @@ import pose_analysis
 import ai_coach
 import youtube_fetch
 import video_trim
+import library_export
 
 # --------------------------------------------------------------------------
 # Configuration
@@ -210,6 +211,28 @@ def _build_entry(video_id, stored_path, display_name):
         "duration": metadata["duration"],
         "uploaded_at": datetime.now(timezone.utc).isoformat(),
     }
+
+
+# --------------------------------------------------------------------------
+# Local training-archive hook (library_export.py) — only ever runs when
+# this process is desktop.py, which sets DARTS_DESKTOP_MODE=1 before
+# starting the server. That's the only context where "analysis just
+# finished" has in-process access to Rishi's own filesystem (a browser hit
+# against the deployed Cloud Run service has no such access at all — see
+# sync_library.py for how those get archived instead). Best-effort: a
+# failure here must never break the analyze response itself, since the
+# archive is a bonus on top of an already-successful analysis, not a
+# dependency of it.
+# --------------------------------------------------------------------------
+
+def _archive_to_local_library(video_paths, analysis, video_type):
+    if os.environ.get("DARTS_DESKTOP_MODE") != "1":
+        return
+    try:
+        dest = library_export.export_session(video_paths, analysis, video_type)
+        app.logger.info("Archived session to local library: %s", dest)
+    except Exception:
+        app.logger.exception("Local library archive failed (analysis result is unaffected)")
 
 
 # --------------------------------------------------------------------------
@@ -642,6 +665,8 @@ def analyze_session(session_id):
     session["dual_analysis"] = analysis
     _save_sessions(sessions)
 
+    _archive_to_local_library({"side": side_path, "front": front_path}, analysis, "two_angle")
+
     return jsonify({"status": "ok", "cached": False, "analysis": analysis})
 
 
@@ -728,6 +753,8 @@ def analyze_video(video_id):
     else:
         entry.pop("overlay_video_url", None)
     _save_library(library)
+
+    _archive_to_local_library({"video": video_path}, analysis, "single")
 
     return jsonify({
         "status": "ok", "cached": False, "analysis": analysis,

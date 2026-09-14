@@ -161,6 +161,81 @@ def rule_based_answer(question, analysis):
 
 
 # --------------------------------------------------------------------------
+# Rule-based narrative — a full written report instead of one Q&A answer at
+# a time. Used by library_export.py to fill the archived session PDF/JSON's
+# narrative field when no LLM provider key is configured (the training
+# archive is generated automatically after every analysis, with nobody
+# necessarily sitting at a keyboard to type a question or paste a key — see
+# library_export.py's module docstring). Deliberately built from the same
+# plain-language, numbers-grounded style as `rule_based_answer` above,
+# just covering every throw instead of answering one keyword-matched
+# question.
+# --------------------------------------------------------------------------
+
+def _throw_narrative(throw, arm):
+    elbow = throw["elbow"]
+    wrist = throw["wrist"]
+    overall = throw["overall"]
+    direction = (elbow.get("direction") or {}).get(
+        "summary", "Not enough tracked frames to tell which way the elbow moved"
+    )
+    sentences = [
+        f"Throw #{throw['throw_number']}: {arm} elbow stability scored {elbow['score']}% "
+        f"({elbow['label']}), with the angle ranging {elbow['angle_min']}-{elbow['angle_max']} "
+        f"degrees (average {elbow['angle_avg']}). {direction}.",
+        f"Wrist snap scored {wrist['score']}% ({wrist['label']}), peaking at "
+        f"{wrist['peak_speed_pct_per_sec']} (% of frame diagonal per second) around release, "
+        f"which landed at frame {throw['release_frame']} ({throw['release_time']}s).",
+        f"Overall this throw scored {overall['score']}% ({overall['label']}), combining elbow "
+        "stability and wrist snap in equal parts.",
+    ]
+
+    front = throw.get("front_view")
+    if front:
+        flare = front.get("elbow_flare_direction")
+        if flare:
+            sentences.append(f"Front view: {flare['summary']}.")
+        lateral = front.get("wrist_lateral_snap")
+        if lateral:
+            sentences.append(lateral["summary"])
+        torso = front.get("torso_alignment")
+        if torso:
+            sentences.append(torso["summary"])
+
+    return " ".join(sentences)
+
+
+def narrative_report(analysis):
+    """Always-available, no-API-key written report covering every throw
+    plus the session-level comparison (and stance/front-view findings, if
+    the analysis has any — see `analyze_dual_angle` in pose_analysis.py).
+    This is the guaranteed fallback; `library_export.py` prefers a real
+    `ai_analyze()` LLM write-up when a provider key happens to be
+    configured in the local environment, and only falls back to this when
+    none is — so archiving a session never blocks on a missing API key."""
+    arm = analysis.get("arm", "right")
+    throws = analysis.get("throws") or []
+    paragraphs = [_throw_narrative(t, arm) for t in throws]
+
+    comparison = analysis.get("comparison") or {}
+    if comparison:
+        paragraphs.append(
+            f"Across all {analysis.get('throw_count', len(throws))} throw(s), the average "
+            f"overall score was {comparison.get('average_score')}% "
+            f"({comparison.get('average_label')}). Best throw: #{comparison.get('best_throw_number')}. "
+            f"Worst throw: #{comparison.get('worst_throw_number')}. Consistency across throws "
+            f"scored {comparison.get('consistency_score')}% ({comparison.get('consistency_label')}) "
+            "— higher means scores varied less from throw to throw."
+        )
+
+    stance = analysis.get("stance_consistency")
+    if stance:
+        paragraphs.append(f"Stance/foot placement: {stance['summary']}")
+
+    return "\n\n".join(paragraphs) if paragraphs else "No throws were scored in this session."
+
+
+# --------------------------------------------------------------------------
 # LLM mode
 # --------------------------------------------------------------------------
 

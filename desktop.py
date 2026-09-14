@@ -14,6 +14,15 @@ import socket
 import threading
 import time
 
+# Must be set before `app` is imported — app.py checks this env var at
+# request time (inside the analyze routes) to decide whether it's safe to
+# write into Rishi's local Teacher Tools folder. Only this launcher runs
+# app.py with real, guaranteed access to this machine's filesystem the
+# instant an analysis finishes (the deployed Cloud Run service has none at
+# all), so this is the one place that flag gets set. See library_export.py
+# and sync_library.py for the two-sided archive design this enables.
+os.environ.setdefault("DARTS_DESKTOP_MODE", "1")
+
 import webview
 
 from app import app as flask_app

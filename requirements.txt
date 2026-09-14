@@ -30,3 +30,14 @@ imageio-ffmpeg
 # Desktop app (desktop.py) — wraps app.py in a native window instead of a
 # browser tab. Not needed if you only ever run `python app.py`.
 pywebview
+
+# Local training-archive PDF report (library_export.py) — builds
+# analysis.pdf for each archived session. Pillow (image sizing for embedded
+# key frames) already comes in via mediapipe/opencv above.
+reportlab
+
+# sync_library.py (the scheduled catch-up half of the training archive)
+# talks to the deployed Cloud Run backend's REST API directly. Already an
+# indirect dependency of google-auth/anthropic, listed explicitly here
+# since sync_library.py imports it directly.
+requests

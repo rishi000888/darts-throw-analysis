@@ -62,6 +62,7 @@
   const libraryGrid = document.getElementById("library-grid");
   const libraryCount = document.getElementById("library-count");
   const videoCountPill = document.getElementById("video-count-pill");
+  const syncNowBtn = document.getElementById("sync-now-btn"); // only rendered in desktop mode — may be null
 
   const videoEl = document.getElementById("video-player");
   const stageEmpty = document.getElementById("stage-empty");
@@ -1675,6 +1676,43 @@
 
   recordBtn.addEventListener("click", openRecordModal);
   recordMoreBtn.addEventListener("click", openRecordModal);
+
+  /* ------------------------------------------------------------------ *
+   * Manual "Sync Now" (desktop app only — button doesn't exist in the
+   * plain browser). Pulls in anything analyzed via browser/mobile since
+   * the last sync, on demand, rather than waiting for the scheduled
+   * catch-up task's own timer — Rishi's practice sessions don't happen on
+   * a fixed schedule, so this button is his preferred trigger; the
+   * scheduled task stays running in the background as a safety net.
+   * ------------------------------------------------------------------ */
+
+  if (syncNowBtn) {
+    syncNowBtn.addEventListener("click", async () => {
+      const originalLabel = syncNowBtn.textContent;
+      syncNowBtn.disabled = true;
+      syncNowBtn.textContent = "Synchronizing…";
+
+      try {
+        const res = await fetch("/api/library/sync-now", { method: "POST" });
+        const data = await res.json();
+
+        if (!res.ok || data.status === "error") {
+          showToast(data.message || data.error || "Sync failed.");
+          return;
+        }
+
+        const parts = [];
+        if (data.sessions) parts.push(`${data.sessions} session${data.sessions === 1 ? "" : "s"}`);
+        if (data.videos) parts.push(`${data.videos} video${data.videos === 1 ? "" : "s"}`);
+        showToast(parts.length ? `Archived ${parts.join(" and ")}.` : "Nothing new to sync.");
+      } catch (err) {
+        showToast("Sync failed — check your connection and try again.");
+      } finally {
+        syncNowBtn.disabled = false;
+        syncNowBtn.textContent = originalLabel;
+      }
+    });
+  }
 
   /* ------------------------------------------------------------------ *
    * Keyboard shortcuts (space to play/pause, arrows to step frames)

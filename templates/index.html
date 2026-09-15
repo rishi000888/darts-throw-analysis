@@ -30,6 +30,12 @@
     </div>
     <nav class="topbar__status">
       <span class="pill" id="video-count-pill">0 / 20 throws loaded</span>
+      {% if desktop_mode %}
+      <button class="btn btn--outline btn--small" id="sync-now-btn" type="button"
+              title="Pull in anything analyzed via browser/mobile that this desktop app doesn't have archived locally yet">
+        Sync Now
+      </button>
+      {% endif %}
     </nav>
   </div>
 </header>

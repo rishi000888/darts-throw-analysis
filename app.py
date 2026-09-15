@@ -32,6 +32,7 @@ import ai_coach
 import youtube_fetch
 import video_trim
 import library_export
+import sync_library
 
 # --------------------------------------------------------------------------
 # Configuration
@@ -241,7 +242,10 @@ def _archive_to_local_library(video_paths, analysis, video_type):
 
 @app.route("/")
 def index():
-    return render_template("index.html")
+    # desktop_mode gates UI that only makes sense on Rishi's own machine
+    # (e.g. the "Sync Now" button below) — the deployed Cloud Run service
+    # never sets DARTS_DESKTOP_MODE, only desktop.py does.
+    return render_template("index.html", desktop_mode=os.environ.get("DARTS_DESKTOP_MODE") == "1")
 
 
 @app.route("/privacy")
@@ -256,6 +260,39 @@ def privacy():
 @app.route("/api/videos", methods=["GET"])
 def list_videos():
     return jsonify(_load_library())
+
+
+# --------------------------------------------------------------------------
+# API: manual "Sync Now" trigger for the local training archive.
+#
+# sync_library.py already runs on a 2-hour Windows Task Scheduler timer as
+# a background safety net (in case Rishi forgets and a Cloud Run redeploy
+# wipes an unarchived session in the gap), but Rishi's actual practice
+# sessions don't happen on a fixed schedule — sometimes hours pass with
+# nothing to sync, sometimes he wants it archived the moment he's done
+# playing. This route is the desktop app's "Sync Now" button: it runs the
+# exact same sync_library.sync() the scheduled task uses, synchronously,
+# and returns the same counts dict so the UI can show a real result
+# ("Archived 2 sessions", "Nothing new to sync") instead of guessing.
+#
+# Desktop-mode only, same reasoning as _archive_to_local_library above —
+# this writes into Rishi's local Documents folder, which only exists on
+# whichever machine is actually running desktop.py. There's no legitimate
+# reason for this route to run on the deployed Cloud Run service itself
+# (it would just be syncing the server against its own API into a
+# filesystem path that doesn't mean anything there).
+# --------------------------------------------------------------------------
+
+@app.route("/api/library/sync-now", methods=["POST"])
+def sync_library_now():
+    if os.environ.get("DARTS_DESKTOP_MODE") != "1":
+        return jsonify({"error": "Sync is only available in the desktop app."}), 403
+    try:
+        result = sync_library.sync()
+    except Exception as exc:
+        app.logger.exception("Manual sync-now failed")
+        return jsonify({"status": "error", "message": str(exc)}), 500
+    return jsonify({"status": "ok", **result})
 
 
 # --------------------------------------------------------------------------

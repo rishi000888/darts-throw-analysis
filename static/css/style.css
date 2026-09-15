@@ -98,6 +98,8 @@ button { font-family: inherit; cursor: pointer; }
   justify-content: space-between;
 }
 
+.topbar__status { display: flex; align-items: center; gap: 10px; }
+
 .brand { display: flex; align-items: center; gap: 10px; }
 
 .brand__mark { width: 30px; height: 30px; display: block; }

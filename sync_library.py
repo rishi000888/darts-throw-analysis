@@ -23,16 +23,37 @@ can land at any time Adhor or anyone else pushes to `main`. Running this
 once a day risks losing anything uploaded+analyzed in the gap before a
 same-day redeploy; running it every couple of hours instead shrinks that
 window to something small rather than eliminating it outright (nothing
-short of the desktop-app path is a *zero*-risk window). A Windows Task
-Scheduler task named "DartsAnalysis Library Sync" was created 2026-09-14
-to run this every 2 hours (`schtasks /query /tn "DartsAnalysis Library
-Sync" /v` to inspect it, or open Task Scheduler and look under the root
-folder) — battery-power restrictions were explicitly disabled on that task
-since this runs on a laptop and the whole point is not missing a sync
-window. If that task ever needs recreating:
+short of the desktop-app path is a *zero*-risk window).
+
+As of 2026-09-15, this scheduled run is a background safety net, not
+Rishi's primary way of syncing — the desktop app now has its own "Sync
+Now" button (`/api/library/sync-now` in app.py) that calls this module's
+`sync()` on demand, since Rishi's actual play sessions don't happen on a
+fixed timer and he'd rather trigger this himself right after a session
+than wait up to 2 hours for it.
+
+A Windows Task Scheduler task named "DartsAnalysis Library Sync" was
+created 2026-09-14 to run this every 2 hours (`schtasks /query /tn
+"DartsAnalysis Library Sync" /v` to inspect it, or open Task Scheduler and
+look under the root folder) — battery-power restrictions were explicitly
+disabled on that task since this runs on a laptop and the whole point is
+not missing a sync window. Its action was switched 2026-09-15 from
+python.exe to **pythonw.exe** — python.exe is a console-subsystem binary,
+so Task Scheduler launching it with no existing console to attach to was
+popping open a new, visible PowerShell/Windows Terminal-looking window on
+every run; pythonw.exe is the windowless variant, built for exactly this
+kind of background/GUI-less run. One consequence: under pythonw.exe,
+sys.stdout/sys.stderr are `None` (confirmed by direct test, no console at
+all to attach to) — the win32 stdout/stderr `.reconfigure()` calls above
+are guarded for that; `print()` itself is a no-op when sys.stdout is None
+rather than an error, so `_log()`'s console output line is silently
+skipped on scheduled runs — the `.sync_log.txt` file (see `_log()` below)
+is what actually captures scheduled-run output, exactly as it already had
+to for the no-console python.exe case. If that task ever needs
+recreating:
 
     schtasks /create /tn "DartsAnalysis Library Sync" /sc hourly /mo 2 ^
-        /tr "\"<path to venv>\\Scripts\\python.exe\" \"<path to this file>\"" ^
+        /tr "\"<path to venv>\\Scripts\\pythonw.exe\" \"<path to this file>\"" ^
         /st 00:00
     (then also disable "Start the task only if the computer is on AC
     power" in the task's Conditions tab, or via
@@ -76,9 +97,19 @@ import library_export
 # this script's own stdout is often a Windows console stuck on a legacy
 # codepage that can't encode them, which would otherwise crash the whole
 # sync on a single print() rather than just skipping that one item.
+#
+# When this runs via the scheduled Task Scheduler task (pythonw.exe, no
+# console attached at all — switched from python.exe 2026-09-15 to stop a
+# console window popping up on every run), sys.stdout/sys.stderr are None
+# rather than a real stream, so .reconfigure() itself would raise
+# AttributeError before sync() ever starts — confirmed by direct test.
+# print() with sys.stdout is None is fine on its own (Python no-ops it),
+# so the only thing that needs guarding is this reconfigure call.
 if sys.platform == "win32":
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    if sys.stdout is not None:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    if sys.stderr is not None:
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 DEFAULT_BASE_URL = "https://darts-analysis-352937407000.asia-southeast1.run.app"
 MANIFEST_NAME = ".sync_manifest.json"

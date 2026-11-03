@@ -13,9 +13,14 @@ frame-accurate, slow-motion video player, plus AI pose-detection scoring.
 - **Add from YouTube** (`youtube_fetch.py`): paste a YouTube link — a
   coaching clip, a pro's technique, one of your own uploads — and it's
   downloaded straight into the library via `yt-dlp`, same as a picked or
-  recorded file. Capped at 10 minutes per clip (`YOUTUBE_MAX_DURATION` env
-  var to change it) and restricted to pre-muxed formats so no system
-  `ffmpeg` install is required.
+  recorded file. Capped at 30 minutes per clip (`YOUTUBE_MAX_DURATION` env
+  var to change it) and to 720p (`YOUTUBE_MAX_HEIGHT`), which is all pose
+  detection needs. Video and audio come down as separate streams and get
+  merged with the static `ffmpeg` that `imageio-ffmpeg` already bundles, so
+  no system `ffmpeg` install is required. Import is just the first step for a long
+  source video — use Trim below to cut it down to the throws worth scoring
+  before analyzing, since analysis itself tops out around 2-4 minutes of
+  footage (gunicorn's 280s request timeout).
 - **Trim a clip down before analyzing it** (`video_trim.py`): a toolbar
   under the timeline — "Mark Start" / "Mark End" set an in/out point from
   wherever the player's currently paused, then "Create Trimmed Clip" cuts

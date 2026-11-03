@@ -1,7 +1,21 @@
-# Dependencies for the Render web deployment only (see render.yaml /
-# Dockerfile). Kept separate from requirements.txt so local dev still
-# installs pywebview for desktop.py, which Render never needs and which
-# would otherwise require extra system GTK/WebKit packages in the image.
+# Dependencies for the deployed server image. Despite the "render" in the
+# name this is the Cloud Run dependency list — the Dockerfile's only
+# `pip install` reads THIS file, not requirements.txt (render.yaml is stale
+# and unused; the name is kept because renaming it means touching the
+# Dockerfile for no benefit). Kept separate from requirements.txt so local
+# dev still installs pywebview for desktop.py, which the server never needs
+# and which would otherwise require extra system GTK/WebKit packages in the
+# image.
+#
+# Anything app.py imports at module scope has to be in here. That is easy to
+# get wrong, because requirements.txt is the file you naturally edit when
+# adding a dependency and nothing locally ever notices the omission — the
+# failure only shows up as the deployed container exiting on
+# ModuleNotFoundError before gunicorn can bind $PORT, which Cloud Run
+# surfaces as a bare 503 "service is not available yet" on every request
+# with no traceback in front of you. That is exactly what reportlab below
+# caused (diagnosed 2026-11-03); if you add an import to app.py or anything
+# it pulls in, add it here too.
 
 Flask==3.0.3
 Werkzeug==3.0.3
@@ -13,3 +27,14 @@ yt-dlp
 imageio-ffmpeg
 gunicorn==22.0.0
 google-cloud-storage
+
+# app.py imports library_export (which imports reportlab at module scope)
+# and sync_library unconditionally, so the server needs both even though it
+# never actually builds a PDF or runs a sync itself — the training archive
+# is a purely local feature, and the two routes that use it are desktop-only
+# (see app.py's export hook and /api/library/sync-now). requests arrives
+# transitively via google-cloud-storage/google-api-core, but sync_library.py
+# imports it directly, so it is pinned here explicitly rather than left to
+# chance on a future dependency bump.
+reportlab
+requests

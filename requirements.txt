@@ -16,8 +16,11 @@ openai
 google-genai
 
 # "Add from YouTube" — downloads a clip straight into the library instead
-# of requiring a local file. No system ffmpeg needed: youtube_fetch.py
-# restricts to pre-muxed formats so yt-dlp never has to merge streams.
+# of requiring a local file. Needs imageio-ffmpeg below (not a system
+# ffmpeg) to merge YouTube's separate video/audio streams — YouTube stopped
+# serving pre-muxed formats, so youtube_fetch.py can't avoid the merge any
+# more. Keep this reasonably fresh: YouTube regularly breaks older yt-dlp
+# releases, which shows up as 403s or "video unavailable" on import.
 yt-dlp
 
 # Bundles a static ffmpeg binary, so nothing here needs a system ffmpeg
